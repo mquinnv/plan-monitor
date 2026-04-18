@@ -35,6 +35,8 @@ func parseSessionsIndex(data []byte) ([]sessionEntry, error) {
 	return idx.Entries, nil
 }
 
+// findMostRecentSession returns the session ID with the latest Modified timestamp.
+// The entries slice is sorted in place. ISO 8601 UTC timestamps sort lexicographically.
 func findMostRecentSession(entries []sessionEntry) string {
 	if len(entries) == 0 {
 		return ""
