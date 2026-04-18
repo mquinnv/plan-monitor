@@ -6,72 +6,108 @@ import (
 	"testing"
 )
 
-func TestFindPlanNameFromJSONL(t *testing.T) {
+func TestFindPlanFileFromJSONL(t *testing.T) {
 	tmpDir := t.TempDir()
+	plansDir := filepath.Join(tmpDir, "plans")
+	os.MkdirAll(plansDir, 0o755)
 	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
 
-	lines := []string{
-		`{"type":"user","message":"hello"}`,
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"planning"},{"type":"tool_use","name":"EnterPlanMode","input":{}}]}}`,
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"here is the plan"}]}}`,
-	}
-	content := ""
-	for _, l := range lines {
-		content += l + "\n"
-	}
+	// Simulate a Write tool call with "file_path" field
+	content := `{"type":"user","message":"hello"}
+{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"` + plansDir + `/my-cool-plan.md","content":"# Plan"}}]}
+{"type":"user","message":"done"}
+`
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	found := sessionUsedPlan(jsonlPath)
-	if !found {
-		t.Error("expected sessionUsedPlan to return true")
+	got := findPlanFileFromJSONL(jsonlPath, plansDir)
+	if got != "my-cool-plan.md" {
+		t.Errorf("findPlanFileFromJSONL = %q, want %q", got, "my-cool-plan.md")
 	}
 }
 
-func TestFindPlanNameFromJSONLNoPlan(t *testing.T) {
+func TestFindPlanFileFromJSONLIgnoresGenericMentions(t *testing.T) {
 	tmpDir := t.TempDir()
+	plansDir := filepath.Join(tmpDir, "plans")
 	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
 
-	lines := []string{
-		`{"type":"user","message":"hello"}`,
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"no plan here"}]}}`,
-	}
-	content := ""
-	for _, l := range lines {
-		content += l + "\n"
-	}
+	// ls output mentions plan files but not via "file_path" — should be ignored
+	content := `{"type":"user","message":"hello"}
+{"type":"assistant","content":"writing plan to ` + plansDir + `/my-cool-plan.md"}
+{"stdout":"` + plansDir + `/old-plan.md\n"}
+`
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	found := sessionUsedPlan(jsonlPath)
-	if found {
-		t.Error("expected sessionUsedPlan to return false")
+	got := findPlanFileFromJSONL(jsonlPath, plansDir)
+	if got != "" {
+		t.Errorf("findPlanFileFromJSONL = %q, want empty (should ignore non-file_path mentions)", got)
 	}
 }
 
-func TestFindMostRecentPlan(t *testing.T) {
+func TestFindPlanFileFromJSONLNoPlan(t *testing.T) {
 	tmpDir := t.TempDir()
+	plansDir := filepath.Join(tmpDir, "plans")
+	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
 
-	os.WriteFile(filepath.Join(tmpDir, "old-plan.md"), []byte("# Old Plan\nstuff"), 0o644)
-	os.WriteFile(filepath.Join(tmpDir, "new-plan.md"), []byte("# New Plan\nbetter stuff"), 0o644)
+	content := `{"type":"user","message":"hello"}
+{"type":"assistant","content":"no plan here"}
+`
+	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	name, content, err := findMostRecentPlan(tmpDir)
-	if err != nil {
-		t.Fatalf("findMostRecentPlan error: %v", err)
-	}
-	if name == "" {
-		t.Fatal("expected a plan name, got empty")
-	}
-	if content == "" {
-		t.Fatal("expected plan content, got empty")
+	got := findPlanFileFromJSONL(jsonlPath, plansDir)
+	if got != "" {
+		t.Errorf("findPlanFileFromJSONL = %q, want empty", got)
 	}
 }
 
-func TestFindMostRecentPlanEmptyDir(t *testing.T) {
+func TestFindPlanFileFromJSONLPicksLast(t *testing.T) {
 	tmpDir := t.TempDir()
-	name, content, err := findMostRecentPlan(tmpDir)
-	if err != nil {
-		t.Fatalf("findMostRecentPlan error: %v", err)
+	plansDir := filepath.Join(tmpDir, "plans")
+	os.MkdirAll(plansDir, 0o755)
+	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
+
+	// Two Write tool calls — should pick the last one
+	content := `{"input":{"file_path":"` + plansDir + `/first-plan.md"}}
+{"input":{"file_path":"` + plansDir + `/second-plan.md"}}
+`
+	os.WriteFile(jsonlPath, []byte(content), 0o644)
+
+	got := findPlanFileFromJSONL(jsonlPath, plansDir)
+	if got != "second-plan.md" {
+		t.Errorf("findPlanFileFromJSONL = %q, want %q", got, "second-plan.md")
 	}
-	if name != "" || content != "" {
-		t.Errorf("expected empty results, got name=%q content=%q", name, content)
+}
+
+func TestDiscoverPlan(t *testing.T) {
+	tmpDir := t.TempDir()
+	plansDir := filepath.Join(tmpDir, "plans")
+	os.MkdirAll(plansDir, 0o755)
+	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
+
+	os.WriteFile(filepath.Join(plansDir, "test-plan.md"), []byte("# My Test Plan\nsome content"), 0o644)
+
+	content := `{"input":{"file_path":"` + plansDir + `/test-plan.md"}}
+`
+	os.WriteFile(jsonlPath, []byte(content), 0o644)
+
+	title, planContent := discoverPlan(plansDir, jsonlPath)
+	if title != "My Test Plan" {
+		t.Errorf("title = %q, want %q", title, "My Test Plan")
+	}
+	if planContent == "" {
+		t.Error("expected plan content, got empty")
+	}
+}
+
+func TestDiscoverPlanNoPlanInSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	plansDir := filepath.Join(tmpDir, "plans")
+	os.MkdirAll(plansDir, 0o755)
+	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
+
+	os.WriteFile(jsonlPath, []byte(`{"type":"user","message":"hello"}`+"\n"), 0o644)
+
+	title, content := discoverPlan(plansDir, jsonlPath)
+	if title != "" || content != "" {
+		t.Errorf("expected empty, got title=%q content=%q", title, content)
 	}
 }

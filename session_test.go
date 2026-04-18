@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestEncodeProjectPath(t *testing.T) {
@@ -102,4 +103,45 @@ func TestResolveSessionExplicitOverride(t *testing.T) {
 	if got != "explicit-id" {
 		t.Errorf("resolveSession = %q, want %q", got, "explicit-id")
 	}
+}
+
+func TestResolveSessionFallbackToJSONL(t *testing.T) {
+	// No sessions-index.json, but .jsonl files exist
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "-test-project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create two .jsonl files with different mod times
+	older := filepath.Join(projectDir, "older-session.jsonl")
+	newer := filepath.Join(projectDir, "newer-session.jsonl")
+	if err := os.WriteFile(older, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newer, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Touch older file to be older
+	oldTime := mustParseTime(t, "2026-01-01T00:00:00Z")
+	if err := os.Chtimes(older, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveSession(tmpDir, "/test/project", "")
+	if err != nil {
+		t.Fatalf("resolveSession error: %v", err)
+	}
+	if got != "newer-session" {
+		t.Errorf("resolveSession = %q, want %q", got, "newer-session")
+	}
+}
+
+func mustParseTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t.Fatalf("failed to parse time %q: %v", s, err)
+	}
+	return parsed
 }

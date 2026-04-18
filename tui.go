@@ -48,15 +48,16 @@ type model struct {
 	sessionID string
 
 	// State
-	tasks       []task
-	planTitle   string
-	planContent string
-	lastUpdate  time.Time
-	width       int
-	height      int
-	scroll      int
-	ready       bool
-	err         error
+	tasks        []task
+	planTitle    string
+	planRendered string // pre-rendered markdown
+	lastUpdate   time.Time
+	width        int
+	height       int
+	scroll       int
+	ready        bool
+	polling      bool
+	err          error
 }
 
 func newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID string) model {
@@ -83,20 +84,38 @@ func (m model) tick() tea.Cmd {
 }
 
 func (m model) pollData() tea.Cmd {
+	tasksDir := m.tasksDir
+	plansDir := m.plansDir
+	jsonlPath := m.jsonlPath
+	width := m.width
 	return func() tea.Msg {
-		return dataMsg{time: time.Now()}
+		tasks, _ := readTasks(tasksDir)
+		title, content := discoverPlan(plansDir, jsonlPath)
+		var rendered string
+		if content != "" {
+			rendered, _ = renderMarkdown(content, width-4)
+		}
+		return dataMsg{
+			time:         time.Now(),
+			tasks:        tasks,
+			planTitle:    title,
+			planRendered: rendered,
+		}
 	}
 }
 
 type dataMsg struct {
-	time time.Time
+	time         time.Time
+	tasks        []task
+	planTitle    string
+	planRendered string
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "q", "ctrl+c", "esc":
 			return m, tea.Quit
 		case "up", "k":
 			if m.scroll > 0 {
@@ -112,19 +131,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 
 	case tickMsg:
+		if m.polling {
+			return m, m.tick()
+		}
+		m.polling = true
 		return m, tea.Batch(m.pollData(), m.tick())
 
 	case dataMsg:
-		tasks, err := readTasks(m.tasksDir)
-		if err != nil {
-			m.err = err
-		} else {
-			m.tasks = tasks
-		}
-
-		title, content := discoverPlan(m.plansDir, m.jsonlPath)
-		m.planTitle = title
-		m.planContent = content
+		m.polling = false
+		m.tasks = msg.tasks
+		m.planTitle = msg.planTitle
+		m.planRendered = msg.planRendered
 		m.lastUpdate = msg.time
 	}
 
@@ -136,83 +153,106 @@ func (m model) View() string {
 		return "Loading..."
 	}
 
-	var b strings.Builder
-
-	// Header
-	header := titleStyle.Render("plan-monitor") + " " +
-		lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Render(m.cwd)
-	b.WriteString(header)
-	b.WriteString("\n")
-
-	// Plan section
-	if m.planTitle != "" {
-		b.WriteString(headerStyle.Render("Plan: " + m.planTitle))
-		b.WriteString("\n")
-
-		rendered, err := renderMarkdown(m.planContent, m.width-4)
-		if err == nil && rendered != "" {
-			// Limit plan display height
-			lines := strings.Split(rendered, "\n")
-			maxPlanLines := m.height / 3
-			if maxPlanLines < 5 {
-				maxPlanLines = 5
-			}
-			if len(lines) > maxPlanLines {
-				start := m.scroll
-				if start > len(lines)-maxPlanLines {
-					start = len(lines) - maxPlanLines
-				}
-				if start < 0 {
-					start = 0
-				}
-				lines = lines[start : start+maxPlanLines]
-				lines = append(lines, pendingStyle.Render("  ... (scroll with j/k)"))
-			}
-			b.WriteString(strings.Join(lines, "\n"))
-			b.WriteString("\n")
-		}
-	}
-
-	// Tasks section
+	// Build tasks section first so we can measure it
+	var taskLines []string
 	completed, total := taskCounts(m.tasks)
 	if total > 0 {
-		taskHeader := fmt.Sprintf("Tasks (%d/%d complete)", completed, total)
-		b.WriteString(headerStyle.Render(taskHeader))
-		b.WriteString("\n")
-
+		taskLines = append(taskLines, headerStyle.Render(fmt.Sprintf("Tasks (%d/%d complete)", completed, total)))
 		for _, t := range m.tasks {
-			var icon, line string
+			var icon, label string
 			switch t.Status {
 			case "completed":
 				icon = completedStyle.Render("  ✓")
-				line = completedStyle.Render(" " + t.Subject)
+				label = completedStyle.Render(" " + t.Subject)
 			case "in_progress":
 				icon = inProgressStyle.Render("  ⟳")
-				label := t.Subject
+				subj := t.Subject
 				if t.ActiveForm != "" {
-					label = t.ActiveForm
+					subj = t.ActiveForm
 				}
-				line = inProgressStyle.Render(" " + label)
+				label = inProgressStyle.Render(" " + subj)
 			default:
 				icon = pendingStyle.Render("  ○")
-				line = pendingStyle.Render(" " + t.Subject)
+				label = pendingStyle.Render(" " + t.Subject)
 			}
-			b.WriteString(icon + line + "\n")
+			taskLines = append(taskLines, icon+label)
 		}
 	} else {
-		b.WriteString(headerStyle.Render("Tasks"))
-		b.WriteString("\n")
-		b.WriteString(pendingStyle.Render("  No active tasks"))
-		b.WriteString("\n")
+		taskLines = append(taskLines, headerStyle.Render("Tasks"))
+		taskLines = append(taskLines, pendingStyle.Render("  No active tasks"))
 	}
 
-	// Footer
+	// Build footer
 	elapsed := time.Since(m.lastUpdate).Truncate(time.Second)
 	shortID := m.sessionID
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
 	footer := fmt.Sprintf("Session: %s · Updated %s ago · q to quit", shortID, elapsed)
+
+	// Calculate space budget
+	// 1 header + 1 plan title + len(taskLines) + 1 footer + margins
+	fixedLines := 1 + len(taskLines) + 2 // header + tasks + footer + blank
+	if m.planTitle != "" {
+		fixedLines++ // plan title line
+	}
+	planBudget := m.height - fixedLines
+	if planBudget < 5 {
+		planBudget = 5
+	}
+
+	// Build output
+	var b strings.Builder
+
+	// Header
+	b.WriteString(titleStyle.Render("plan-monitor") + " " +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Render(m.cwd))
+	b.WriteString("\n")
+	usedLines := 1
+
+	// Plan section
+	if m.planTitle != "" {
+		b.WriteString(headerStyle.Render("Plan: " + m.planTitle))
+		b.WriteString("\n")
+		usedLines++
+
+		if m.planRendered != "" {
+			lines := strings.Split(strings.TrimRight(m.planRendered, "\n"), "\n")
+			scrollable := len(lines) > planBudget
+			if scrollable {
+				start := m.scroll
+				maxStart := len(lines) - planBudget
+				if start > maxStart {
+					start = maxStart
+				}
+				if start < 0 {
+					start = 0
+				}
+				lines = lines[start : start+planBudget]
+				lines = append(lines, pendingStyle.Render("  ... (scroll with j/k)"))
+			}
+			for _, line := range lines {
+				b.WriteString(line)
+				b.WriteString("\n")
+				usedLines++
+			}
+		}
+	}
+
+	// Tasks section
+	for _, line := range taskLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+		usedLines++
+	}
+
+	// Pad to push footer to bottom
+	for usedLines < m.height-1 {
+		b.WriteString("\n")
+		usedLines++
+	}
+
+	// Footer
 	b.WriteString(footerStyle.Render(footer))
 
 	return b.String()

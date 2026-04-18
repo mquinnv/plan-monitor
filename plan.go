@@ -2,88 +2,58 @@ package main
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
-// sessionUsedPlan scans the JSONL file line-by-line for EnterPlanMode tool calls.
-// Does not parse full JSON — just looks for the string to avoid loading large files.
-func sessionUsedPlan(jsonlPath string) bool {
+// findPlanFileFromJSONL scans the JSONL for Write tool calls that target
+// ~/.claude/plans/*.md. This avoids false positives from ls output or other
+// mentions of the plans directory. The pattern we look for is:
+//   "file_path":"/Users/.../.claude/plans/<slug>.md"
+func findPlanFileFromJSONL(jsonlPath string, plansDir string) string {
 	f, err := os.Open(jsonlPath)
 	if err != nil {
-		return false
+		return ""
 	}
 	defer f.Close()
 
+	// The pattern that appears in Write tool_use input
+	marker := `"file_path":"` + plansDir + "/"
+
+	var lastPlanFile string
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB line buffer
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
-		if strings.Contains(scanner.Text(), "EnterPlanMode") {
-			return true
-		}
-	}
-	return false
-}
-
-// findMostRecentPlan returns the name and content of the most recently modified
-// .md file in the plans directory.
-func findMostRecentPlan(plansDir string) (name string, content string, err error) {
-	entries, err := os.ReadDir(plansDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", "", nil
-		}
-		return "", "", fmt.Errorf("reading plans dir: %w", err)
-	}
-
-	type planFile struct {
-		name    string
-		modTime int64
-	}
-
-	var plans []planFile
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		line := scanner.Text()
+		idx := strings.Index(line, marker)
+		if idx < 0 {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
+		// Extract filename after the marker
+		rest := line[idx+len(marker):]
+		if end := strings.Index(rest, `"`); end > 0 && strings.HasSuffix(rest[:end], ".md") {
+			lastPlanFile = rest[:end]
 		}
-		plans = append(plans, planFile{name: entry.Name(), modTime: info.ModTime().UnixNano()})
 	}
 
-	if len(plans) == 0 {
-		return "", "", nil
-	}
-
-	sort.Slice(plans, func(i, j int) bool {
-		return plans[i].modTime > plans[j].modTime
-	})
-
-	mostRecent := plans[0]
-	data, err := os.ReadFile(filepath.Join(plansDir, mostRecent.name))
-	if err != nil {
-		return "", "", fmt.Errorf("reading plan file: %w", err)
-	}
-
-	return mostRecent.name, string(data), nil
+	return lastPlanFile
 }
 
-// discoverPlan finds the active plan content. It checks if the session used a plan,
-// and returns the most recently modified plan file.
+// discoverPlan finds the active plan for this session by scanning the JSONL
+// for Write tool calls that created/modified plan files in ~/.claude/plans/.
 func discoverPlan(plansDir string, jsonlPath string) (title string, content string) {
-	if !sessionUsedPlan(jsonlPath) {
+	planFile := findPlanFileFromJSONL(jsonlPath, plansDir)
+	if planFile == "" {
 		return "", ""
 	}
 
-	name, planContent, err := findMostRecentPlan(plansDir)
-	if err != nil || name == "" {
+	planPath := filepath.Join(plansDir, planFile)
+	data, err := os.ReadFile(planPath)
+	if err != nil {
 		return "", ""
 	}
+	planContent := string(data)
 
 	// Extract title from first markdown heading
 	for _, line := range strings.Split(planContent, "\n") {
@@ -93,7 +63,7 @@ func discoverPlan(plansDir string, jsonlPath string) (title string, content stri
 		}
 	}
 	if title == "" {
-		title = strings.TrimSuffix(name, ".md")
+		title = strings.TrimSuffix(planFile, ".md")
 	}
 
 	return title, planContent
