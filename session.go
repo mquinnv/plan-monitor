@@ -81,26 +81,10 @@ func resolveSession(claudeProjectsDir string, cwd string, explicitSession string
 
 	encoded := encodeProjectPath(cwd)
 	projectDir := filepath.Join(claudeProjectsDir, encoded)
-	indexPath := filepath.Join(projectDir, "sessions-index.json")
 
-	data, err := os.ReadFile(indexPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Fallback: discover sessions from .jsonl files
-			return discoverSessionsFromJSONL(projectDir)
-		}
-		return "", fmt.Errorf("reading sessions index at %s: %w", indexPath, err)
-	}
-
-	entries, err := parseSessionsIndex(data)
-	if err != nil {
-		return "", err
-	}
-
-	sessionID := findMostRecentSession(entries)
-	if sessionID == "" {
-		return "", fmt.Errorf("no sessions found for project %s", cwd)
-	}
-
-	return sessionID, nil
+	// Always discover from JSONL file mtimes — sessions-index.json can lag
+	// arbitrarily behind reality (its `modified` timestamps are not refreshed
+	// per turn), and we want the truly-active session, not the most-recently-
+	// indexed one.
+	return discoverSessionsFromJSONL(projectDir)
 }

@@ -68,8 +68,10 @@ func TestFindMostRecentSession(t *testing.T) {
 	}
 }
 
-func TestResolveSession(t *testing.T) {
-	// Create temp dir structure mimicking ~/.claude/projects/<encoded>/
+func TestResolveSessionPrefersFreshJSONLOverStaleIndex(t *testing.T) {
+	// sessions-index.json can lag behind reality. The active session may
+	// be writing a JSONL file whose mtime is newer than anything the
+	// index references. resolveSession must pick the JSONL-mtime winner.
 	tmpDir := t.TempDir()
 	projectDir := filepath.Join(tmpDir, "-test-project")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -79,10 +81,13 @@ func TestResolveSession(t *testing.T) {
 	indexData := `{
 		"version": 1,
 		"entries": [
-			{"sessionId": "sess-abc", "modified": "2026-04-18T14:00:00.000Z"}
+			{"sessionId": "stale-session", "modified": "2026-02-03T19:41:12.821Z"}
 		]
 	}`
 	if err := os.WriteFile(filepath.Join(projectDir, "sessions-index.json"), []byte(indexData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "fresh-session.jsonl"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -90,8 +95,8 @@ func TestResolveSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSession error: %v", err)
 	}
-	if got != "sess-abc" {
-		t.Errorf("resolveSession = %q, want %q", got, "sess-abc")
+	if got != "fresh-session" {
+		t.Errorf("resolveSession = %q, want %q (must prefer JSONL mtime over stale index)", got, "fresh-session")
 	}
 }
 
