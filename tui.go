@@ -262,7 +262,7 @@ func (m model) View() string {
 	b.WriteString("\n")
 
 	// Status line 1
-	b.WriteString(renderStatusLine1(m.state, m.modelName, m.contextPct, time.Now()))
+	b.WriteString(renderStatusLine1(m.state, m.modelName, m.contextPct, m.width, time.Now()))
 	b.WriteString("\n")
 
 	// Status line 2 — only when rateOK
@@ -459,7 +459,7 @@ func renderHeader(cwd string, g GitStatus) string {
 	return prefix + " · " + name + " " + branchStr
 }
 
-func renderStatusLine1(s State, model string, ctxPct float64, now time.Time) string {
+func renderStatusLine1(s State, model string, ctxPct float64, width int, now time.Time) string {
 	var dot string
 	switch s.Kind {
 	case StateIdle:
@@ -481,13 +481,16 @@ func renderStatusLine1(s State, model string, ctxPct float64, now time.Time) str
 		durStr = formatDuration(now.Sub(s.Since))
 	}
 	modelShort := shortModel(model)
+	left := fmt.Sprintf("%s %s %s · %s", dot, s.Label(), durStr, modelShort)
 
 	bar := renderBar(10, ctxPct, thresholdColor(ctxPct))
-	pctStr := fmt.Sprintf("%d%%", int(ctxPct+0.5))
-	budget := formatBudget(contextBudget(model))
-	ctxStr := fmt.Sprintf("ctx %s %s (%s)", bar, pctStr, budget)
+	right := fmt.Sprintf("ctx %s %d%% (%s)", bar, int(ctxPct+0.5), formatBudget(contextBudget(model)))
 
-	return fmt.Sprintf("%s %s %s · %s · %s", dot, s.Label(), durStr, modelShort, ctxStr)
+	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if pad < 2 {
+		pad = 2
+	}
+	return left + strings.Repeat(" ", pad) + right
 }
 
 // renderBar draws a styled progress bar at pct (0-100) with given width and
