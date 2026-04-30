@@ -347,18 +347,19 @@ func renderStatusbar(m model, now time.Time) string {
 		durStr = formatDuration(now.Sub(m.state.Since))
 	}
 
-	parts := []string{fmt.Sprintf("%s %s %s", dot, m.state.Label(), durStr)}
+	leftParts := []string{fmt.Sprintf("%s %s %s", dot, m.state.Label(), durStr)}
 	if m.modelName != "" {
-		parts = append(parts, shortModel(m.modelName))
+		leftParts = append(leftParts, shortModel(m.modelName))
 	}
-	parts = append(parts, fmt.Sprintf("ctx %s %d%%",
+	leftParts = append(leftParts, fmt.Sprintf("ctx %s %d%%",
 		renderBar(10, m.contextPct, thresholdColor(m.contextPct)),
 		int(m.contextPct+0.5)))
 
+	var rightParts []string
 	if m.rateOK {
 		fhPct := float64(m.rateLimits.FiveHour.UsedPercent)
 		wkPct := float64(m.rateLimits.SevenDay.UsedPercent)
-		parts = append(parts,
+		rightParts = append(rightParts,
 			fmt.Sprintf("5h %s %d%%→%s",
 				renderBar(10, fhPct, thresholdColor(fhPct)),
 				m.rateLimits.FiveHour.UsedPercent,
@@ -372,12 +373,24 @@ func renderStatusbar(m model, now time.Time) string {
 		if rate > 0 {
 			eta := etaToEmptyPct(m.rateLimits.FiveHour.UsedPercent, rate)
 			if eta > 0 && now.Add(eta).Before(m.rateLimits.FiveHour.ResetsAt) {
-				parts = append(parts, "empty in "+formatDuration(eta))
+				rightParts = append(rightParts, "empty in "+formatDuration(eta))
 			}
 		}
 	}
 
-	line := " " + strings.Join(parts, " · ") + " "
+	left := strings.Join(leftParts, " · ")
+	right := strings.Join(rightParts, " · ")
+
+	var line string
+	if right == "" {
+		line = " " + left + " "
+	} else {
+		pad := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+		if pad < 2 {
+			pad = 2
+		}
+		line = " " + left + strings.Repeat(" ", pad) + right + " "
+	}
 	return statusbarStyle.Width(m.width).Render(line)
 }
 
