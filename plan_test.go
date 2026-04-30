@@ -104,18 +104,39 @@ func TestDiscoverPlan(t *testing.T) {
 	os.MkdirAll(plansDir, 0o755)
 	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
 
-	os.WriteFile(filepath.Join(plansDir, "test-plan.md"), []byte("# My Test Plan\nsome content"), 0o644)
+	planContent := "# My Test Plan\n\n- [x] Step 1\n- [ ] **Step 2: do the thing**\n- [ ] Step 3\n"
+	os.WriteFile(filepath.Join(plansDir, "test-plan.md"), []byte(planContent), 0o644)
 
-	content := `{"input":{"file_path":"` + plansDir + `/test-plan.md"}}
-`
+	content := `{"input":{"file_path":"` + plansDir + `/test-plan.md"}}` + "\n"
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	title, planContent := discoverPlan(plansDir, jsonlPath, "")
+	title, step := discoverPlan(plansDir, jsonlPath, "")
 	if title != "My Test Plan" {
-		t.Errorf("title = %q, want %q", title, "My Test Plan")
+		t.Errorf("title = %q", title)
 	}
-	if planContent == "" {
-		t.Error("expected plan content, got empty")
+	if step != "Step 2: do the thing" {
+		t.Errorf("step = %q, want %q", step, "Step 2: do the thing")
+	}
+}
+
+func TestDiscoverPlanNoUncheckedSteps(t *testing.T) {
+	tmpDir := t.TempDir()
+	plansDir := filepath.Join(tmpDir, "plans")
+	os.MkdirAll(plansDir, 0o755)
+	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
+
+	planContent := "# Done Plan\n- [x] Step 1\n- [x] Step 2\n"
+	os.WriteFile(filepath.Join(plansDir, "done.md"), []byte(planContent), 0o644)
+
+	content := `{"input":{"file_path":"` + plansDir + `/done.md"}}` + "\n"
+	os.WriteFile(jsonlPath, []byte(content), 0o644)
+
+	title, step := discoverPlan(plansDir, jsonlPath, "")
+	if title != "Done Plan" {
+		t.Errorf("title = %q", title)
+	}
+	if step != "" {
+		t.Errorf("step should be empty, got %q", step)
 	}
 }
 
@@ -127,9 +148,9 @@ func TestDiscoverPlanNoPlanInSession(t *testing.T) {
 
 	os.WriteFile(jsonlPath, []byte(`{"type":"user","message":"hello"}`+"\n"), 0o644)
 
-	title, content := discoverPlan(plansDir, jsonlPath, "")
-	if title != "" || content != "" {
-		t.Errorf("expected empty, got title=%q content=%q", title, content)
+	title, step := discoverPlan(plansDir, jsonlPath, "")
+	if title != "" || step != "" {
+		t.Errorf("expected empty, got title=%q step=%q", title, step)
 	}
 }
 
@@ -148,11 +169,8 @@ func TestDiscoverPlanProjectLocal(t *testing.T) {
 `
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	title, got := discoverPlan(plansDir, jsonlPath, cwd)
+	title, _ := discoverPlan(plansDir, jsonlPath, cwd)
 	if title != "Local Plan" {
 		t.Errorf("title = %q, want %q", title, "Local Plan")
-	}
-	if got == "" {
-		t.Error("expected plan content, got empty")
 	}
 }

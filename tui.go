@@ -6,7 +6,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -48,16 +47,16 @@ type model struct {
 	sessionID string
 
 	// State
-	tasks        []task
-	planTitle    string
-	planRendered string // pre-rendered markdown
-	lastUpdate   time.Time
-	width        int
-	height       int
-	scroll       int
-	ready        bool
-	polling      bool
-	err          error
+	tasks      []task
+	planTitle  string
+	planStep   string
+	lastUpdate time.Time
+	width      int
+	height     int
+	scroll     int
+	ready      bool
+	polling    bool
+	err        error
 }
 
 func newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID string) model {
@@ -88,28 +87,23 @@ func (m model) pollData() tea.Cmd {
 	plansDir := m.plansDir
 	jsonlPath := m.jsonlPath
 	cwd := m.cwd
-	width := m.width
 	return func() tea.Msg {
 		tasks, _ := readTasks(tasksDir)
-		title, content := discoverPlan(plansDir, jsonlPath, cwd)
-		var rendered string
-		if content != "" {
-			rendered, _ = renderMarkdown(content, width-4)
-		}
+		title, step := discoverPlan(plansDir, jsonlPath, cwd)
 		return dataMsg{
-			time:         time.Now(),
-			tasks:        tasks,
-			planTitle:    title,
-			planRendered: rendered,
+			time:      time.Now(),
+			tasks:     tasks,
+			planTitle: title,
+			planStep:  step,
 		}
 	}
 }
 
 type dataMsg struct {
-	time         time.Time
-	tasks        []task
-	planTitle    string
-	planRendered string
+	time      time.Time
+	tasks     []task
+	planTitle string
+	planStep  string
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -142,7 +136,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.polling = false
 		m.tasks = msg.tasks
 		m.planTitle = msg.planTitle
-		m.planRendered = msg.planRendered
+		m.planStep = msg.planStep
 		m.lastUpdate = msg.time
 	}
 
@@ -191,17 +185,6 @@ func (m model) View() string {
 	}
 	footer := fmt.Sprintf("Session: %s · Updated %s ago · q to quit", shortID, elapsed)
 
-	// Calculate space budget
-	// 1 header + 1 plan title + len(taskLines) + 1 footer + margins
-	fixedLines := 1 + len(taskLines) + 2 // header + tasks + footer + blank
-	if m.planTitle != "" {
-		fixedLines++ // plan title line
-	}
-	planBudget := m.height - fixedLines
-	if planBudget < 5 {
-		planBudget = 5
-	}
-
 	// Build output
 	var b strings.Builder
 
@@ -217,26 +200,10 @@ func (m model) View() string {
 		b.WriteString("\n")
 		usedLines++
 
-		if m.planRendered != "" {
-			lines := strings.Split(strings.TrimRight(m.planRendered, "\n"), "\n")
-			scrollable := len(lines) > planBudget
-			if scrollable {
-				start := m.scroll
-				maxStart := len(lines) - planBudget
-				if start > maxStart {
-					start = maxStart
-				}
-				if start < 0 {
-					start = 0
-				}
-				lines = lines[start : start+planBudget]
-				lines = append(lines, pendingStyle.Render("  ... (scroll with j/k)"))
-			}
-			for _, line := range lines {
-				b.WriteString(line)
-				b.WriteString("\n")
-				usedLines++
-			}
+		if m.planStep != "" {
+			b.WriteString(inProgressStyle.Render("  ⟳ " + m.planStep))
+			b.WriteString("\n")
+			usedLines++
 		}
 	}
 
@@ -259,16 +226,3 @@ func (m model) View() string {
 	return b.String()
 }
 
-func renderMarkdown(md string, width int) (string, error) {
-	if width < 20 {
-		width = 20
-	}
-	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(width),
-	)
-	if err != nil {
-		return "", err
-	}
-	return r.Render(md)
-}

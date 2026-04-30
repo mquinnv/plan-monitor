@@ -54,29 +54,45 @@ func findPlanFileFromJSONL(jsonlPath string, plansDir string, cwd string) string
 }
 
 // discoverPlan finds the active plan for this session by scanning the JSONL
-// for Write tool calls that created/modified plan files.
-func discoverPlan(plansDir string, jsonlPath string, cwd string) (title string, content string) {
+// for Write tool calls that created/modified plan files. Returns the plan
+// title (from the first markdown heading) and the first unchecked task line.
+func discoverPlan(plansDir string, jsonlPath string, cwd string) (title string, currentStep string) {
 	planPath := findPlanFileFromJSONL(jsonlPath, plansDir, cwd)
 	if planPath == "" {
 		return "", ""
 	}
-
 	data, err := os.ReadFile(planPath)
 	if err != nil {
 		return "", ""
 	}
 	planContent := string(data)
 
-	// Extract title from first markdown heading
 	for _, line := range strings.Split(planContent, "\n") {
-		if strings.HasPrefix(line, "# ") {
+		if strings.HasPrefix(line, "# ") && title == "" {
 			title = strings.TrimPrefix(line, "# ")
-			break
+		}
+		if currentStep == "" {
+			if step := extractCurrentStep(line); step != "" {
+				currentStep = step
+			}
 		}
 	}
 	if title == "" {
 		title = strings.TrimSuffix(filepath.Base(planPath), ".md")
 	}
+	return title, currentStep
+}
 
-	return title, planContent
+// extractCurrentStep returns the text of the first unchecked task line in
+// markdown, e.g. "- [ ] Step 2: do thing" → "Step 2: do thing". Empty
+// string when the line isn't an unchecked task.
+func extractCurrentStep(line string) string {
+	t := strings.TrimSpace(line)
+	if !strings.HasPrefix(t, "- [ ]") {
+		return ""
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(t, "- [ ]"))
+	rest = strings.TrimPrefix(rest, "**")
+	rest = strings.TrimSuffix(rest, "**")
+	return rest
 }
