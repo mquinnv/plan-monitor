@@ -43,6 +43,14 @@ var (
 	dotCompact  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A855F7")).Render("●")
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
 	branchStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
+
+	statusbarStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("#1a1a1a")).
+			Foreground(lipgloss.Color("#cccccc"))
+	statusbarErrStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#1a1a1a")).
+				Foreground(lipgloss.Color("#EF4444")).
+				Bold(true)
 	dirtyBranch = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00"))
 	promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true)
 )
@@ -256,85 +264,124 @@ func (m model) View() string {
 		return "Loading..."
 	}
 
-	var b strings.Builder
+	now := time.Now()
+	var top strings.Builder
 
 	// Header
-	b.WriteString(renderHeader(m.cwd, m.gitStatus))
-	b.WriteString("\n")
+	top.WriteString(renderHeader(m.cwd, m.gitStatus))
+	top.WriteString("\n")
 
-	// Status line 1
-	b.WriteString(renderStatusLine1(m.state, m.modelName, m.contextPct, m.width, time.Now()))
-	b.WriteString("\n")
-
-	// Status line 2 — only when rateOK
-	if m.rateOK {
-		line2 := renderStatusLine2(m.rateLimits, m.pctSamples, m.width, time.Now())
-		if line2 != "" {
-			b.WriteString(line2)
-			b.WriteString("\n")
-		}
-	}
-
-	// Last prompt
+	// Last prompt — anchors "what was asked"
 	if m.lastPrompt != "" {
-		b.WriteString("\n")
-		b.WriteString(renderLastPrompt(m.lastPrompt, m.width))
-		b.WriteString("\n")
+		top.WriteString("\n")
+		top.WriteString(renderLastPrompt(m.lastPrompt, m.width))
+		top.WriteString("\n")
 	}
 
 	// Plan summary
 	if m.planTitle != "" {
-		b.WriteString("\n")
-		b.WriteString(headerStyle.Render("Plan: " + m.planTitle))
-		b.WriteString("\n")
+		top.WriteString("\n")
+		top.WriteString(headerStyle.Render("Plan: " + m.planTitle))
+		top.WriteString("\n")
 		if m.planStep != "" {
-			b.WriteString(inProgressStyle.Render("  ⟳ " + m.planStep))
-			b.WriteString("\n")
+			top.WriteString(inProgressStyle.Render("  ⟳ " + m.planStep))
+			top.WriteString("\n")
 		}
 	}
 
 	// Tasks
 	completed, total := taskCounts(m.tasks)
-	b.WriteString("\n")
+	top.WriteString("\n")
 	taskPct := 0.0
 	if total > 0 {
 		taskPct = 100.0 * float64(completed) / float64(total)
 	}
 	taskBar := renderBar(10, taskPct, "#7D56F4")
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Tasks %s %d/%d", taskBar, completed, total)))
-	b.WriteString("\n")
+	top.WriteString(headerStyle.Render(fmt.Sprintf("Tasks %s %d/%d", taskBar, completed, total)))
+	top.WriteString("\n")
 	visible, hidden := capTasks(m.tasks, 10)
 	for _, t := range visible {
-		b.WriteString(renderTaskLine(t))
-		b.WriteString("\n")
+		top.WriteString(renderTaskLine(t))
+		top.WriteString("\n")
 	}
 	if hidden > 0 {
-		b.WriteString(pendingStyle.Render(fmt.Sprintf("  …and %d more", hidden)))
-		b.WriteString("\n")
+		top.WriteString(pendingStyle.Render(fmt.Sprintf("  …and %d more", hidden)))
+		top.WriteString("\n")
 	}
 
 	// Activity feed
 	feed := buildActivityFeed(m.allEvents, 7)
-	if rendered := renderActivityFeed(feed, time.Now(), m.width); rendered != "" {
-		b.WriteString("\n")
-		b.WriteString(rendered)
+	if rendered := renderActivityFeed(feed, now, m.width); rendered != "" {
+		top.WriteString("\n")
+		top.WriteString(rendered)
 	}
 
-	// Footer
-	b.WriteString("\n")
-	elapsed := time.Since(m.lastUpdate).Truncate(time.Second)
+	topStr := top.String()
+	statusbar := renderStatusbar(m, now)
+
+	// Pin statusbar to bottom of pane.
+	topLines := strings.Count(topStr, "\n")
+	gap := m.height - topLines - 1
+	if gap < 1 {
+		gap = 1
+	}
+	return topStr + strings.Repeat("\n", gap) + statusbar
+}
+
+// renderStatusbar packs all session/state/budget info onto a single
+// background-filled line at the bottom of the pane.
+func renderStatusbar(m model, now time.Time) string {
+	var dot string
+	switch m.state.Kind {
+	case StateIdle:
+		dot = dotIdle
+	case StateThinking:
+		dot = dotThinking
+	case StateTool:
+		dot = dotTool
+	case StateAwaiting, StateError:
+		dot = dotError
+	case StateCompacting:
+		dot = dotCompact
+	default:
+		dot = dotIdle
+	}
+	durStr := "0:00"
+	if !m.state.Since.IsZero() {
+		durStr = formatDuration(now.Sub(m.state.Since))
+	}
+
+	parts := []string{fmt.Sprintf("%s %s %s", dot, m.state.Label(), durStr)}
+	if m.modelName != "" {
+		parts = append(parts, shortModel(m.modelName))
+	}
+	parts = append(parts, fmt.Sprintf("ctx %d%%", int(m.contextPct+0.5)))
+
+	if m.rateOK {
+		parts = append(parts,
+			fmt.Sprintf("5h %d%%→%s", m.rateLimits.FiveHour.UsedPercent, m.rateLimits.FiveHour.ResetsAt.Local().Format("3:04p")),
+			fmt.Sprintf("wk %d%%→%s", m.rateLimits.SevenDay.UsedPercent, m.rateLimits.SevenDay.ResetsAt.Local().Format("Mon")),
+		)
+		rate := burnRatePctPerMin(m.pctSamples, now)
+		if rate > 0 {
+			eta := etaToEmptyPct(m.rateLimits.FiveHour.UsedPercent, rate)
+			if eta > 0 && now.Add(eta).Before(m.rateLimits.FiveHour.ResetsAt) {
+				parts = append(parts, "empty in "+formatDuration(eta))
+			}
+		}
+	}
+
 	shortID := m.sessionID
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
-	errCount := countErrors(m.allEvents)
-	errStr := ""
-	if errCount > 0 {
-		errStr = " · " + lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render(fmt.Sprintf("%d error%s", errCount, plural(errCount)))
+	parts = append(parts, "sess "+shortID)
+	if errCount := countErrors(m.allEvents); errCount > 0 {
+		parts = append(parts, statusbarErrStyle.Render(fmt.Sprintf("%d error%s", errCount, plural(errCount))))
 	}
-	b.WriteString(footerStyle.Render(fmt.Sprintf("sess %s · upd %s", shortID, elapsed)) + errStr)
 
-	return b.String()
+	line := " " + strings.Join(parts, " · ") + " "
+	return statusbarStyle.Width(m.width).Render(line)
 }
 
 type feedEntry struct {
@@ -460,40 +507,6 @@ func renderHeader(cwd string, g GitStatus) string {
 	return prefix + " · " + name + " " + branchStr
 }
 
-func renderStatusLine1(s State, model string, ctxPct float64, width int, now time.Time) string {
-	var dot string
-	switch s.Kind {
-	case StateIdle:
-		dot = dotIdle
-	case StateThinking:
-		dot = dotThinking
-	case StateTool:
-		dot = dotTool
-	case StateAwaiting, StateError:
-		dot = dotError
-	case StateCompacting:
-		dot = dotCompact
-	default:
-		dot = dotIdle
-	}
-
-	durStr := "0:00"
-	if !s.Since.IsZero() {
-		durStr = formatDuration(now.Sub(s.Since))
-	}
-	modelShort := shortModel(model)
-	left := fmt.Sprintf("%s %s %s · %s", dot, s.Label(), durStr, modelShort)
-
-	bar := renderBar(10, ctxPct, thresholdColor(ctxPct))
-	right := fmt.Sprintf("ctx %s %d%% (%s)", bar, int(ctxPct+0.5), formatBudget(contextBudget(model)))
-
-	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if pad < 2 {
-		pad = 2
-	}
-	return left + strings.Repeat(" ", pad) + right
-}
-
 // renderBar draws a styled progress bar at pct (0-100) with given width and
 // solid fill color. Uses bubbles/progress for consistent character rendering.
 func renderBar(width int, pct float64, color string) string {
@@ -522,41 +535,6 @@ func thresholdColor(pct float64) string {
 	default:
 		return "#04B575"
 	}
-}
-
-func renderStatusLine2(rl RateLimits, pctSamples []pctSample, width int, now time.Time) string {
-	fiveLine := renderWindowLine("5-hour ", float64(rl.FiveHour.UsedPercent),
-		"resets "+rl.FiveHour.ResetsAt.Local().Format("3:04 PM"), width)
-	weekLine := renderWindowLine("weekly ", float64(rl.SevenDay.UsedPercent),
-		"resets "+rl.SevenDay.ResetsAt.Local().Format("Mon Jan 2"), width)
-
-	rate := burnRatePctPerMin(pctSamples, now)
-	var etaStr string
-	switch {
-	case rate == 0:
-		etaStr = "measuring burn rate…"
-	default:
-		eta := etaToEmptyPct(rl.FiveHour.UsedPercent, rate)
-		if eta == 0 || now.Add(eta).After(rl.FiveHour.ResetsAt) {
-			etaStr = "safe until reset"
-		} else {
-			etaStr = "empty in " + formatDuration(eta)
-		}
-	}
-
-	return fiveLine + "\n" + weekLine + "\n" + dimStyle.Render(etaStr)
-}
-
-// renderWindowLine renders one rate-limit window: "<label> <bar> <pct>%
-// ... <suffix>" with the suffix right-aligned against `width`.
-func renderWindowLine(label string, pct float64, suffix string, width int) string {
-	bar := renderBar(10, pct, thresholdColor(pct))
-	left := fmt.Sprintf("%s%s %d%%", label, bar, int(pct+0.5))
-	pad := width - lipgloss.Width(left) - lipgloss.Width(suffix)
-	if pad < 2 {
-		pad = 2
-	}
-	return left + strings.Repeat(" ", pad) + dimStyle.Render(suffix)
 }
 
 func renderLastPrompt(text string, width int) string {
