@@ -8,47 +8,59 @@ import (
 )
 
 // findPlanFileFromJSONL scans the JSONL for Write tool calls that target
-// ~/.claude/plans/*.md. This avoids false positives from ls output or other
-// mentions of the plans directory. The pattern we look for is:
-//   "file_path":"/Users/.../.claude/plans/<slug>.md"
-func findPlanFileFromJSONL(jsonlPath string, plansDir string) string {
+// plan .md files. It checks both ~/.claude/plans/ and project-local
+// docs/superpowers/plans/ directories. Returns the full path to the most
+// recently written plan file.
+func findPlanFileFromJSONL(jsonlPath string, plansDir string, cwd string) string {
 	f, err := os.Open(jsonlPath)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
 
-	// The pattern that appears in Write tool_use input
-	marker := `"file_path":"` + plansDir + "/"
+	markers := []string{
+		`"file_path":"` + plansDir + "/",
+	}
+	// Also look for project-local plan directories
+	if cwd != "" {
+		localPlansDir := filepath.Join(cwd, "docs", "superpowers", "plans")
+		markers = append(markers, `"file_path":"`+localPlansDir+"/")
+	}
 
-	var lastPlanFile string
+	var lastPlanPath string
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		idx := strings.Index(line, marker)
-		if idx < 0 {
-			continue
-		}
-		// Extract filename after the marker
-		rest := line[idx+len(marker):]
-		if end := strings.Index(rest, `"`); end > 0 && strings.HasSuffix(rest[:end], ".md") {
-			lastPlanFile = rest[:end]
+		for _, marker := range markers {
+			idx := strings.Index(line, marker)
+			if idx < 0 {
+				continue
+			}
+			// Extract full path after "file_path":"
+			fpMarker := `"file_path":"`
+			fpIdx := strings.LastIndex(line[:idx+len(marker)], fpMarker)
+			if fpIdx < 0 {
+				continue
+			}
+			rest := line[fpIdx+len(fpMarker):]
+			if end := strings.Index(rest, `"`); end > 0 && strings.HasSuffix(rest[:end], ".md") {
+				lastPlanPath = rest[:end]
+			}
 		}
 	}
 
-	return lastPlanFile
+	return lastPlanPath
 }
 
 // discoverPlan finds the active plan for this session by scanning the JSONL
-// for Write tool calls that created/modified plan files in ~/.claude/plans/.
-func discoverPlan(plansDir string, jsonlPath string) (title string, content string) {
-	planFile := findPlanFileFromJSONL(jsonlPath, plansDir)
-	if planFile == "" {
+// for Write tool calls that created/modified plan files.
+func discoverPlan(plansDir string, jsonlPath string, cwd string) (title string, content string) {
+	planPath := findPlanFileFromJSONL(jsonlPath, plansDir, cwd)
+	if planPath == "" {
 		return "", ""
 	}
 
-	planPath := filepath.Join(plansDir, planFile)
 	data, err := os.ReadFile(planPath)
 	if err != nil {
 		return "", ""
@@ -63,7 +75,7 @@ func discoverPlan(plansDir string, jsonlPath string) (title string, content stri
 		}
 	}
 	if title == "" {
-		title = strings.TrimSuffix(planFile, ".md")
+		title = strings.TrimSuffix(filepath.Base(planPath), ".md")
 	}
 
 	return title, planContent

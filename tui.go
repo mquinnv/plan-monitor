@@ -87,10 +87,11 @@ func (m model) pollData() tea.Cmd {
 	tasksDir := m.tasksDir
 	plansDir := m.plansDir
 	jsonlPath := m.jsonlPath
+	cwd := m.cwd
 	width := m.width
 	return func() tea.Msg {
 		tasks, _ := readTasks(tasksDir)
-		title, content := discoverPlan(plansDir, jsonlPath)
+		title, content := discoverPlan(plansDir, jsonlPath, cwd)
 		var rendered string
 		if content != "" {
 			rendered, _ = renderMarkdown(content, width-4)

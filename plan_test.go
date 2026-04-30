@@ -19,9 +19,10 @@ func TestFindPlanFileFromJSONL(t *testing.T) {
 `
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	got := findPlanFileFromJSONL(jsonlPath, plansDir)
-	if got != "my-cool-plan.md" {
-		t.Errorf("findPlanFileFromJSONL = %q, want %q", got, "my-cool-plan.md")
+	got := findPlanFileFromJSONL(jsonlPath, plansDir, "")
+	want := plansDir + "/my-cool-plan.md"
+	if got != want {
+		t.Errorf("findPlanFileFromJSONL = %q, want %q", got, want)
 	}
 }
 
@@ -37,7 +38,7 @@ func TestFindPlanFileFromJSONLIgnoresGenericMentions(t *testing.T) {
 `
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	got := findPlanFileFromJSONL(jsonlPath, plansDir)
+	got := findPlanFileFromJSONL(jsonlPath, plansDir, "")
 	if got != "" {
 		t.Errorf("findPlanFileFromJSONL = %q, want empty (should ignore non-file_path mentions)", got)
 	}
@@ -53,7 +54,7 @@ func TestFindPlanFileFromJSONLNoPlan(t *testing.T) {
 `
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	got := findPlanFileFromJSONL(jsonlPath, plansDir)
+	got := findPlanFileFromJSONL(jsonlPath, plansDir, "")
 	if got != "" {
 		t.Errorf("findPlanFileFromJSONL = %q, want empty", got)
 	}
@@ -71,9 +72,29 @@ func TestFindPlanFileFromJSONLPicksLast(t *testing.T) {
 `
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	got := findPlanFileFromJSONL(jsonlPath, plansDir)
-	if got != "second-plan.md" {
-		t.Errorf("findPlanFileFromJSONL = %q, want %q", got, "second-plan.md")
+	got := findPlanFileFromJSONL(jsonlPath, plansDir, "")
+	want := plansDir + "/second-plan.md"
+	if got != want {
+		t.Errorf("findPlanFileFromJSONL = %q, want %q", got, want)
+	}
+}
+
+func TestFindPlanFileFromJSONLProjectLocal(t *testing.T) {
+	tmpDir := t.TempDir()
+	plansDir := filepath.Join(tmpDir, "plans")
+	cwd := filepath.Join(tmpDir, "project")
+	localPlansDir := filepath.Join(cwd, "docs", "superpowers", "plans")
+	os.MkdirAll(localPlansDir, 0o755)
+	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
+
+	content := `{"input":{"file_path":"` + localPlansDir + `/2026-04-20-my-plan.md"}}
+`
+	os.WriteFile(jsonlPath, []byte(content), 0o644)
+
+	got := findPlanFileFromJSONL(jsonlPath, plansDir, cwd)
+	want := localPlansDir + "/2026-04-20-my-plan.md"
+	if got != want {
+		t.Errorf("findPlanFileFromJSONL = %q, want %q", got, want)
 	}
 }
 
@@ -89,7 +110,7 @@ func TestDiscoverPlan(t *testing.T) {
 `
 	os.WriteFile(jsonlPath, []byte(content), 0o644)
 
-	title, planContent := discoverPlan(plansDir, jsonlPath)
+	title, planContent := discoverPlan(plansDir, jsonlPath, "")
 	if title != "My Test Plan" {
 		t.Errorf("title = %q, want %q", title, "My Test Plan")
 	}
@@ -106,8 +127,32 @@ func TestDiscoverPlanNoPlanInSession(t *testing.T) {
 
 	os.WriteFile(jsonlPath, []byte(`{"type":"user","message":"hello"}`+"\n"), 0o644)
 
-	title, content := discoverPlan(plansDir, jsonlPath)
+	title, content := discoverPlan(plansDir, jsonlPath, "")
 	if title != "" || content != "" {
 		t.Errorf("expected empty, got title=%q content=%q", title, content)
+	}
+}
+
+func TestDiscoverPlanProjectLocal(t *testing.T) {
+	tmpDir := t.TempDir()
+	plansDir := filepath.Join(tmpDir, "plans")
+	cwd := filepath.Join(tmpDir, "project")
+	localPlansDir := filepath.Join(cwd, "docs", "superpowers", "plans")
+	os.MkdirAll(localPlansDir, 0o755)
+	jsonlPath := filepath.Join(tmpDir, "session.jsonl")
+
+	planContent := "# Local Plan\nproject-specific content"
+	os.WriteFile(filepath.Join(localPlansDir, "my-plan.md"), []byte(planContent), 0o644)
+
+	content := `{"input":{"file_path":"` + localPlansDir + `/my-plan.md"}}
+`
+	os.WriteFile(jsonlPath, []byte(content), 0o644)
+
+	title, got := discoverPlan(plansDir, jsonlPath, cwd)
+	if title != "Local Plan" {
+		t.Errorf("title = %q, want %q", title, "Local Plan")
+	}
+	if got == "" {
+		t.Error("expected plan content, got empty")
 	}
 }
