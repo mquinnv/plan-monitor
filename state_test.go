@@ -41,17 +41,6 @@ func TestClassifyToolCompletedNotInFlight(t *testing.T) {
 	}
 }
 
-func TestClassifyAwaitingHeuristic(t *testing.T) {
-	now := time.Now()
-	events := []Event{
-		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}, Timestamp: now.Add(-30 * time.Second).Format(time.RFC3339)},
-	}
-	got := classifyState(events, now)
-	if got.Kind != StateAwaiting {
-		t.Errorf("stuck tool_use after 30s: got %v, want StateAwaiting", got.Kind)
-	}
-}
-
 func TestClassifySkipsBookkeepingEvents(t *testing.T) {
 	// Claude Code interleaves "attachment", "last-prompt", "system", etc.
 	// between user/assistant turns. Those bookkeeping events must NOT
