@@ -705,13 +705,18 @@ git commit -m "feat(plan-monitor): classify session state from event stream"
 
 ---
 
-## Task 4: Budget tracker (context %, windows, burn rate, ETA)
+## Task 4: Budget tracker (context %, rate-limit file reader, burn rate, ETA)
 
 **Files:**
 - Create: `budget.go`
 - Create: `budget_test.go`
 
-Track context fullness, 5-hour and weekly window usage, and project burn-rate ETA. Source values come from `Event.Usage` (per-turn token usage) populated in Task 2. Caps come from a hardcoded plan table; plan detection is the simplest version — assume Max-style, with API-billing override via `PLAN_MONITOR_API_BILLING=1` env var. (Refine if Task 1 surfaced a better detection path; otherwise this is intentional simplicity per the spec's degraded-mode philosophy.)
+> **Revised after Task 1.** The investigation surfaced a real cap source: `~/.claude/abtop-rate-limits.json` is written by the Claude Code statusline hook every turn and contains `{five_hour, seven_day}.{used_percentage, resets_at}`. We **do not** self-track tokens against a hardcoded plan table. We **do not** track per-turn `usageSamples`. Instead:
+>
+> - **Cap percentages and reset times:** read from the file. If the file is missing, we degrade (omit line 2).
+> - **Burn rate:** rate of change of `five_hour.used_percentage` over the last 15 min, computed from a small ring of `pctSample` snapshots taken on each poll.
+> - **ETA-to-empty:** `(100 - usedPct) / burnRatePctPerMin`.
+> - **Context %:** still derived from JSONL `message.usage` (per-turn) — that part is unchanged.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -721,6 +726,8 @@ Create `budget_test.go`:
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -743,56 +750,91 @@ func TestContextPercentUnknownModel(t *testing.T) {
 	}
 }
 
-func TestWindowUsageRollingFiveHour(t *testing.T) {
-	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
-	samples := []usageSample{
-		{at: now.Add(-6 * time.Hour), tokens: 100_000}, // outside window
-		{at: now.Add(-3 * time.Hour), tokens: 50_000},
-		{at: now.Add(-30 * time.Minute), tokens: 30_000},
+func TestReadRateLimits(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rate-limits.json")
+	body := `{"source":"claude","updated_at":1777557367,` +
+		`"five_hour":{"used_percentage":9,"resets_at":1777572000},` +
+		`"seven_day":{"used_percentage":11,"resets_at":1777928400}}`
+	os.WriteFile(path, []byte(body), 0o644)
+
+	rl, err := readRateLimits(path)
+	if err != nil {
+		t.Fatalf("readRateLimits error: %v", err)
 	}
-	got := windowUsage(samples, now, 5*time.Hour)
-	if got != 80_000 {
-		t.Errorf("windowUsage = %d, want 80000", got)
+	if rl.FiveHour.UsedPercent != 9 || rl.SevenDay.UsedPercent != 11 {
+		t.Errorf("percentages = %d/%d, want 9/11", rl.FiveHour.UsedPercent, rl.SevenDay.UsedPercent)
+	}
+	if rl.FiveHour.ResetsAt.Unix() != 1777572000 {
+		t.Errorf("five_hour ResetsAt = %v, want unix 1777572000", rl.FiveHour.ResetsAt)
+	}
+	if rl.UpdatedAt.Unix() != 1777557367 {
+		t.Errorf("UpdatedAt = %v", rl.UpdatedAt)
 	}
 }
 
-func TestBurnRateRolling15Min(t *testing.T) {
-	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
-	samples := []usageSample{
-		{at: now.Add(-20 * time.Minute), tokens: 10_000}, // outside burn window
-		{at: now.Add(-10 * time.Minute), tokens: 5_000},
-		{at: now.Add(-5 * time.Minute), tokens: 5_000},
-	}
-	rate := burnRatePerMinute(samples, now)
-	// 10_000 tokens in last 15 min → ~666/min
-	if rate < 600 || rate > 700 {
-		t.Errorf("burnRatePerMinute = %v, want ~666", rate)
+func TestReadRateLimitsMissingFile(t *testing.T) {
+	_, err := readRateLimits("/nonexistent/path.json")
+	if err == nil {
+		t.Errorf("expected error for missing file")
 	}
 }
 
-func TestBurnRateInsufficientData(t *testing.T) {
+func TestBurnRatePctRolling(t *testing.T) {
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	// pct climbed from 5% to 20% over 15min → 1 pct/min
+	samples := []pctSample{
+		{at: now.Add(-30 * time.Minute), pct: 2},  // outside window
+		{at: now.Add(-15 * time.Minute), pct: 5},
+		{at: now.Add(-10 * time.Minute), pct: 10},
+		{at: now, pct: 20},
+	}
+	rate := burnRatePctPerMin(samples, now)
+	// (20 - 5) / 15 = 1.0
+	if rate < 0.9 || rate > 1.1 {
+		t.Errorf("burnRatePctPerMin = %v, want ~1.0", rate)
+	}
+}
+
+func TestBurnRatePctInsufficientData(t *testing.T) {
 	now := time.Now()
-	samples := []usageSample{{at: now.Add(-30 * time.Second), tokens: 1_000}}
-	rate := burnRatePerMinute(samples, now)
+	samples := []pctSample{{at: now.Add(-30 * time.Second), pct: 5}}
+	rate := burnRatePctPerMin(samples, now)
 	if rate != 0 {
-		t.Errorf("burnRatePerMinute with <2min data = %v, want 0 (sentinel)", rate)
+		t.Errorf("burnRatePctPerMin with <2min data = %v, want 0 (sentinel)", rate)
 	}
 }
 
-func TestETAToEmpty(t *testing.T) {
-	used := 80_000
-	cap := 200_000
-	rate := 1_000.0 // tokens/min
-	eta := etaToEmpty(used, cap, rate)
-	// 120_000 remaining / 1000 = 120 min
-	if eta != 120*time.Minute {
-		t.Errorf("etaToEmpty = %v, want 120m", eta)
+func TestBurnRatePctNonPositive(t *testing.T) {
+	now := time.Now()
+	// pct flat or decreasing — not burning
+	samples := []pctSample{
+		{at: now.Add(-15 * time.Minute), pct: 50},
+		{at: now, pct: 50},
+	}
+	rate := burnRatePctPerMin(samples, now)
+	if rate != 0 {
+		t.Errorf("flat pct should give 0 burn rate, got %v", rate)
 	}
 }
 
-func TestETAToEmptyZeroRate(t *testing.T) {
-	if etaToEmpty(50, 100, 0) != 0 {
+func TestETAToEmptyPct(t *testing.T) {
+	// 60% used, burn 2 pct/min → (100-60)/2 = 20 min
+	eta := etaToEmptyPct(60, 2.0)
+	if eta != 20*time.Minute {
+		t.Errorf("etaToEmptyPct = %v, want 20m", eta)
+	}
+}
+
+func TestETAToEmptyPctZeroRate(t *testing.T) {
+	if etaToEmptyPct(50, 0) != 0 {
 		t.Errorf("zero-rate ETA should be 0 sentinel")
+	}
+}
+
+func TestETAToEmptyPctAlreadyFull(t *testing.T) {
+	if etaToEmptyPct(100, 5) != 0 {
+		t.Errorf("at-or-past 100%% should be 0 sentinel")
 	}
 }
 ```
@@ -800,7 +842,7 @@ func TestETAToEmptyZeroRate(t *testing.T) {
 - [ ] **Step 2: Run tests, confirm they fail**
 
 ```bash
-go test ./... -run "ContextPercent|WindowUsage|BurnRate|ETAToEmpty" -v
+go test ./... -run "ContextPercent|ReadRateLimits|BurnRatePct|ETAToEmptyPct" -v
 ```
 Expected: FAIL — symbols undefined.
 
@@ -810,25 +852,22 @@ Expected: FAIL — symbols undefined.
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"time"
 )
 
-// Per-model context window budgets (in tokens).
+// Per-model context window budgets (in tokens). Falls back to default if
+// model not listed; prefix-match supported (e.g. "claude-opus-4-7-foo").
 var modelContextBudget = map[string]int{
-	"claude-opus-4-7":    200_000,
-	"claude-sonnet-4-6":  200_000,
-	"claude-haiku-4-5":   200_000,
+	"claude-opus-4-7":     200_000,
+	"claude-sonnet-4-6":   200_000,
+	"claude-haiku-4-5":    200_000,
 	"claude-opus-4-7[1m]": 1_000_000,
 }
 
 const defaultContextBudget = 200_000
-
-// usageSample records per-turn token usage at a point in time.
-type usageSample struct {
-	at     time.Time
-	tokens int // total tokens charged for this turn (input + cache + output)
-}
 
 func contextPercent(model string, u Usage) float64 {
 	budget := defaultContextBudget
@@ -842,87 +881,129 @@ func contextPercent(model string, u Usage) float64 {
 	return 100.0 * float64(total) / float64(budget)
 }
 
-// windowUsage sums samples within the rolling window ending at `now`.
-func windowUsage(samples []usageSample, now time.Time, window time.Duration) int {
-	cutoff := now.Add(-window)
-	total := 0
-	for _, s := range samples {
-		if s.at.After(cutoff) {
-			total += s.tokens
-		}
-	}
-	return total
+// RateLimits is the in-memory shape of ~/.claude/abtop-rate-limits.json.
+type RateLimits struct {
+	Source    string
+	UpdatedAt time.Time
+	FiveHour  Window
+	SevenDay  Window
 }
 
-// burnRatePerMinute returns tokens-per-minute over the last 15 minutes.
-// Returns 0 as a sentinel meaning "not enough data" (less than 2 minutes
-// of samples in the window).
-func burnRatePerMinute(samples []usageSample, now time.Time) float64 {
+type Window struct {
+	UsedPercent int
+	ResetsAt    time.Time
+}
+
+// rawRateLimitsFile mirrors the on-disk JSON layout (unix timestamps).
+type rawRateLimitsFile struct {
+	Source    string `json:"source"`
+	UpdatedAt int64  `json:"updated_at"`
+	FiveHour  struct {
+		UsedPercentage int   `json:"used_percentage"`
+		ResetsAt       int64 `json:"resets_at"`
+	} `json:"five_hour"`
+	SevenDay struct {
+		UsedPercentage int   `json:"used_percentage"`
+		ResetsAt       int64 `json:"resets_at"`
+	} `json:"seven_day"`
+}
+
+// readRateLimits parses the abtop-rate-limits.json cache file. The default
+// path is ~/.claude/abtop-rate-limits.json; pass an explicit path for
+// tests or to override.
+func readRateLimits(path string) (RateLimits, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return RateLimits{}, err
+	}
+	var raw rawRateLimitsFile
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return RateLimits{}, err
+	}
+	return RateLimits{
+		Source:    raw.Source,
+		UpdatedAt: time.Unix(raw.UpdatedAt, 0),
+		FiveHour: Window{
+			UsedPercent: raw.FiveHour.UsedPercentage,
+			ResetsAt:    time.Unix(raw.FiveHour.ResetsAt, 0),
+		},
+		SevenDay: Window{
+			UsedPercent: raw.SevenDay.UsedPercentage,
+			ResetsAt:    time.Unix(raw.SevenDay.ResetsAt, 0),
+		},
+	}, nil
+}
+
+// pctSample is a snapshot of the five_hour.used_percentage at a point in
+// time, captured by the controller on each poll. We use these to compute
+// a rolling burn rate.
+type pctSample struct {
+	at  time.Time
+	pct int
+}
+
+// burnRatePctPerMin returns percentage-points per minute over the last
+// ~15 minutes. Returns 0 as a sentinel for "not enough data" (less than
+// 2 minutes of samples) or "rate is zero or negative" (idle / window
+// resetting).
+func burnRatePctPerMin(samples []pctSample, now time.Time) float64 {
 	cutoff := now.Add(-15 * time.Minute)
-	var earliest time.Time
-	total := 0
+	var earliest pctSample
+	var latest pctSample
+	earliestSet := false
 	for _, s := range samples {
-		if s.at.After(cutoff) {
-			if earliest.IsZero() || s.at.Before(earliest) {
-				earliest = s.at
-			}
-			total += s.tokens
+		if !s.at.After(cutoff) {
+			continue
+		}
+		if !earliestSet || s.at.Before(earliest.at) {
+			earliest = s
+			earliestSet = true
+		}
+		if s.at.After(latest.at) {
+			latest = s
 		}
 	}
-	if earliest.IsZero() {
+	if !earliestSet {
 		return 0
 	}
-	span := now.Sub(earliest)
+	span := latest.at.Sub(earliest.at)
 	if span < 2*time.Minute {
 		return 0
 	}
-	return float64(total) / span.Minutes()
-}
-
-// etaToEmpty estimates how long until `used` reaches `cap` at `ratePerMin`.
-// Returns 0 when rate is zero or already at cap.
-func etaToEmpty(used, cap int, ratePerMin float64) time.Duration {
-	if ratePerMin <= 0 || used >= cap {
+	delta := float64(latest.pct - earliest.pct)
+	if delta <= 0 {
 		return 0
 	}
-	remaining := float64(cap - used)
-	mins := remaining / ratePerMin
+	return delta / span.Minutes()
+}
+
+// etaToEmptyPct projects time until usedPct reaches 100 at the given
+// percentage-per-minute burn rate. Returns 0 sentinel if rate is non-
+// positive or window is already full.
+func etaToEmptyPct(usedPct int, ratePctPerMin float64) time.Duration {
+	if ratePctPerMin <= 0 || usedPct >= 100 {
+		return 0
+	}
+	remaining := float64(100 - usedPct)
+	mins := remaining / ratePctPerMin
 	return time.Duration(mins * float64(time.Minute))
-}
-
-// fiveHourReset returns the next reset time for the rolling 5h window. The
-// "rolling" semantics mean it isn't a hard reset; use the time at which the
-// oldest in-window sample falls off, or now+5h if no samples.
-func fiveHourReset(samples []usageSample, now time.Time) time.Time {
-	cutoff := now.Add(-5 * time.Hour)
-	var oldest time.Time
-	for _, s := range samples {
-		if s.at.After(cutoff) {
-			if oldest.IsZero() || s.at.Before(oldest) {
-				oldest = s.at
-			}
-		}
-	}
-	if oldest.IsZero() {
-		return now.Add(5 * time.Hour)
-	}
-	return oldest.Add(5 * time.Hour)
-}
-
-// weeklyReset returns the start of the next ISO week (UTC).
-func weeklyReset(now time.Time) time.Time {
-	t := now.UTC()
-	daysToMonday := (8 - int(t.Weekday())) % 7
-	if daysToMonday == 0 {
-		daysToMonday = 7
-	}
-	next := time.Date(t.Year(), t.Month(), t.Day()+daysToMonday, 0, 0, 0, 0, time.UTC)
-	return next
 }
 
 // totalTokens returns the per-turn charge from a Usage record.
 func totalTokens(u Usage) int {
 	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens + u.OutputTokens
+}
+
+// defaultRateLimitsPath returns the path Claude Code's statusline hook
+// writes to. Override with PLAN_MONITOR_RATE_LIMITS_PATH env var.
+func defaultRateLimitsPath() string {
+	if p := os.Getenv("PLAN_MONITOR_RATE_LIMITS_PATH"); p != "" {
+		return p
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home + "/.claude/abtop-rate-limits.json"
+	}
+	return ""
 }
 ```
 
@@ -1605,15 +1686,17 @@ type model struct {
 	sessionID string
 
 	// Persistent state
-	reader        *EventReader
-	allEvents     []Event       // bounded ring (cap 1000)
-	usageSamples  []usageSample
-	apiBilling    bool          // true if PLAN_MONITOR_API_BILLING=1
+	reader         *EventReader
+	allEvents      []Event       // bounded ring (cap 1000)
+	rateLimitsPath string        // ~/.claude/abtop-rate-limits.json or override
+	pctSamples     []pctSample   // 5h-window snapshots over time, for burn-rate
 
 	// Latest snapshot
 	state        State
-	modelName       string // most recent model from JSONL (named with underscore to avoid collision with struct name)
+	modelName    string  // most recent model from JSONL
 	contextPct   float64
+	rateLimits   RateLimits // last successful read of rateLimitsPath
+	rateOK       bool       // true if rateLimits is fresh and parsed
 	planTitle    string
 	planStep     string
 	tasks        []task
@@ -1630,7 +1713,7 @@ type model struct {
 }
 ```
 
-- [ ] **Step 2: Update `newModel` to initialize the reader and apiBilling flag**
+- [ ] **Step 2: Update `newModel` to initialize reader and rate-limits source**
 
 ```go
 func newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID string) model {
@@ -1638,18 +1721,16 @@ func newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID string) model {
 	r.SeedFromEnd(500)
 	seeded, _ := r.Seeded()
 
-	apiBilling := os.Getenv("PLAN_MONITOR_API_BILLING") == "1"
-
 	m := model{
-		tasksDir:   tasksDir,
-		plansDir:   plansDir,
-		jsonlPath:  jsonlPath,
-		cwd:        cwd,
-		sessionID:  sessionID,
-		reader:     r,
-		allEvents:  seeded,
-		apiBilling: apiBilling,
-		gitStatus:  gitInfo(cwd),
+		tasksDir:       tasksDir,
+		plansDir:       plansDir,
+		jsonlPath:      jsonlPath,
+		cwd:            cwd,
+		sessionID:      sessionID,
+		reader:         r,
+		allEvents:      seeded,
+		rateLimitsPath: defaultRateLimitsPath(),
+		gitStatus:      gitInfo(cwd),
 	}
 	m.recomputeFromEvents(time.Now())
 	return m
@@ -1669,18 +1750,9 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	if last := lastUsage(m.allEvents); last != nil {
 		m.contextPct = contextPercent(m.modelName, *last)
 	}
-	// Append fresh usage samples.
-	for _, e := range m.allEvents {
-		if e.Usage != nil && e.Type == "assistant" && e.Timestamp != "" {
-			at := parseTimestamp(e.Timestamp)
-			if !at.IsZero() && !sampleAlreadyAt(m.usageSamples, at) {
-				m.usageSamples = append(m.usageSamples, usageSample{at: at, tokens: totalTokens(*e.Usage)})
-			}
-		}
-	}
 }
 
-func sampleAlreadyAt(samples []usageSample, at time.Time) bool {
+func sampleAlreadyAt(samples []pctSample, at time.Time) bool {
 	for _, s := range samples {
 		if s.at.Equal(at) {
 			return true
@@ -1725,29 +1797,35 @@ func (m model) pollData() tea.Cmd {
 	plansDir := m.plansDir
 	jsonlPath := m.jsonlPath
 	cwd := m.cwd
+	rlPath := m.rateLimitsPath
 	return func() tea.Msg {
 		newEvents, _ := reader.Tail()
 		tasks, _ := readTasks(tasksDir)
 		title, step := discoverPlan(plansDir, jsonlPath, cwd)
 		git := gitInfo(cwd)
+		rl, rlErr := readRateLimits(rlPath)
 		return dataMsg{
-			time:      time.Now(),
-			newEvents: newEvents,
-			tasks:     tasks,
-			planTitle: title,
-			planStep:  step,
-			gitStatus: git,
+			time:         time.Now(),
+			newEvents:    newEvents,
+			tasks:        tasks,
+			planTitle:    title,
+			planStep:     step,
+			gitStatus:    git,
+			rateLimits:   rl,
+			rateLimitErr: rlErr,
 		}
 	}
 }
 
 type dataMsg struct {
-	time      time.Time
-	newEvents []Event
-	tasks     []task
-	planTitle string
-	planStep  string
-	gitStatus GitStatus
+	time         time.Time
+	newEvents    []Event
+	tasks        []task
+	planTitle    string
+	planStep     string
+	gitStatus    GitStatus
+	rateLimits   RateLimits
+	rateLimitErr error
 }
 ```
 
@@ -1766,6 +1844,25 @@ case dataMsg:
 		if len(m.allEvents) > 1000 {
 			m.allEvents = m.allEvents[len(m.allEvents)-1000:]
 		}
+	}
+	if msg.rateLimitErr == nil {
+		m.rateLimits = msg.rateLimits
+		m.rateOK = true
+		// Append a fresh percent sample if it differs from the last one
+		// or no samples exist yet. Cap retained samples at 1 hour.
+		if len(m.pctSamples) == 0 || m.pctSamples[len(m.pctSamples)-1].pct != msg.rateLimits.FiveHour.UsedPercent {
+			m.pctSamples = append(m.pctSamples, pctSample{at: msg.time, pct: msg.rateLimits.FiveHour.UsedPercent})
+		}
+		cutoff := msg.time.Add(-1 * time.Hour)
+		trimmed := m.pctSamples[:0]
+		for _, s := range m.pctSamples {
+			if s.at.After(cutoff) {
+				trimmed = append(trimmed, s)
+			}
+		}
+		m.pctSamples = trimmed
+	} else {
+		m.rateOK = false
 	}
 	m.recomputeFromEvents(msg.time)
 	m.lastUpdate = msg.time
@@ -1791,11 +1888,13 @@ func (m model) View() string {
 	b.WriteString(renderStatusLine1(m.state, m.modelName, m.contextPct, time.Now()))
 	b.WriteString("\n")
 
-	// Status line 2 (budgets) — show only when we have data
-	line2 := renderStatusLine2(m.usageSamples, time.Now(), m.apiBilling)
-	if line2 != "" {
-		b.WriteString(line2)
-		b.WriteString("\n")
+	// Status line 2 (budgets) — only when we have a fresh rate-limits read
+	if m.rateOK {
+		line2 := renderStatusLine2(m.rateLimits, m.pctSamples, time.Now())
+		if line2 != "" {
+			b.WriteString(line2)
+			b.WriteString("\n")
+		}
 	}
 
 	// Last prompt
@@ -1926,38 +2025,26 @@ func renderStatusLine1(s State, model string, ctxPct float64, now time.Time) str
 	return fmt.Sprintf("%s %s %s · %s · %s", dot, s.Label(), durStr, modelShort, ctxStr)
 }
 
-func renderStatusLine2(samples []usageSample, now time.Time, apiBilling bool) string {
-	if len(samples) == 0 {
-		return ""
-	}
-	fiveH := windowUsage(samples, now, 5*time.Hour)
-	weekly := windowUsage(samples, now, 7*24*time.Hour)
-	const fiveHCap = 5_000_000  // placeholder — refine in Task 1 follow-up
-	const weeklyCap = 35_000_000 // placeholder
-
-	rate := burnRatePerMinute(samples, now)
+func renderStatusLine2(rl RateLimits, pctSamples []pctSample, now time.Time) string {
+	rate := burnRatePctPerMin(pctSamples, now)
 	var etaStr string
 	switch {
 	case rate == 0:
 		etaStr = "measuring…"
 	default:
-		fiveHReset := fiveHourReset(samples, now)
-		weeklyResetT := weeklyReset(now)
-		eta := etaToEmpty(fiveH, fiveHCap, rate)
-		if eta == 0 || (now.Add(eta).After(fiveHReset) && now.Add(etaToEmpty(weekly, weeklyCap, rate)).After(weeklyResetT)) {
+		eta := etaToEmptyPct(rl.FiveHour.UsedPercent, rate)
+		// "safe" if projected exhaustion is past both reset times
+		if eta == 0 || now.Add(eta).After(rl.FiveHour.ResetsAt) {
 			etaStr = "safe until reset"
 		} else {
 			etaStr = "empty in " + formatDuration(eta)
 		}
 	}
 
-	fiveHPct := 100 * fiveH / fiveHCap
-	weeklyPct := 100 * weekly / weeklyCap
-	line := fmt.Sprintf("5h %d%% → %s · wk %d%% → %s · %s",
-		fiveHPct, fiveHourReset(samples, now).Local().Format("3:04p"),
-		weeklyPct, weeklyReset(now).Local().Format("Mon"),
+	return fmt.Sprintf("5h %d%% → %s · wk %d%% → %s · %s",
+		rl.FiveHour.UsedPercent, rl.FiveHour.ResetsAt.Local().Format("3:04p"),
+		rl.SevenDay.UsedPercent, rl.SevenDay.ResetsAt.Local().Format("Mon"),
 		etaStr)
-	return line
 }
 
 func renderLastPrompt(text string, width int) string {
@@ -2002,7 +2089,7 @@ func formatDuration(d time.Duration) string {
 }
 ```
 
-> **Note on caps:** The `5_000_000` and `35_000_000` constants are placeholders. Task 1's findings should drive their final values. If detection isn't viable, keep them as conservative defaults and document in a comment. The spec's degraded-mode philosophy says: better to omit line 2 than show wrong numbers. If after Task 1 you can't trust your caps, add an `if !canTrustCaps { return "" }` guard at the top of `renderStatusLine2`.
+> **Note on degraded mode:** When `~/.claude/abtop-rate-limits.json` is missing or unreadable, `m.rateOK` is false and line 2 is omitted. Context % on line 1 still works since it's derived from JSONL. This matches the spec's degraded-mode philosophy: better to omit line 2 than show wrong numbers.
 
 - [ ] **Step 7: Build, run all tests, manually launch**
 
@@ -2260,5 +2347,5 @@ git commit -m "chore(plan-monitor): final polish from manual verification" || tr
 - **YAGNI:** the spec deliberately omits scrolling, tabs, drill-downs, plan-markdown rendering, and most keyboard input. Resist adding them.
 - **DRY:** the rendering helpers (`renderHeader`, `renderStatusLine1`, etc.) are intentionally pure functions taking primitive inputs so they can be unit-tested later without TUI plumbing. Keep them that way.
 - **Frequent commits:** every task ends in a commit. Don't batch.
-- **Caps in Task 9 are placeholders.** If Task 1 didn't surface a clean detection path, add a `// TODO(plan-monitor): refine after rate-limit data source decided` comment at the constants and ensure `renderStatusLine2` returns `""` until you trust the numbers — that satisfies the spec's degraded-mode behavior.
+- **Cap data is read from `~/.claude/abtop-rate-limits.json`** (resolved in Task 1). When the file is missing, `m.rateOK` is false and line 2 is omitted entirely — degraded-mode behavior per the spec.
 - **Subagent JSONLs are out of scope.** When `Agent` is in flight, just show `Agent <type> "<desc>"` — don't try to follow the child session.
