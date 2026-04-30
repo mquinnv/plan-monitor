@@ -41,6 +41,7 @@ var (
 	dotTool     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00")).Render("●")
 	dotError    = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("●")
 	dotCompact  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A855F7")).Render("●")
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
 	branchStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
 	dirtyBranch = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00"))
 	promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true)
@@ -267,7 +268,7 @@ func (m model) View() string {
 
 	// Status line 2 — only when rateOK
 	if m.rateOK {
-		line2 := renderStatusLine2(m.rateLimits, m.pctSamples, time.Now())
+		line2 := renderStatusLine2(m.rateLimits, m.pctSamples, m.width, time.Now())
 		if line2 != "" {
 			b.WriteString(line2)
 			b.WriteString("\n")
@@ -523,12 +524,17 @@ func thresholdColor(pct float64) string {
 	}
 }
 
-func renderStatusLine2(rl RateLimits, pctSamples []pctSample, now time.Time) string {
+func renderStatusLine2(rl RateLimits, pctSamples []pctSample, width int, now time.Time) string {
+	fiveLine := renderWindowLine("5-hour ", float64(rl.FiveHour.UsedPercent),
+		"resets "+rl.FiveHour.ResetsAt.Local().Format("3:04 PM"), width)
+	weekLine := renderWindowLine("weekly ", float64(rl.SevenDay.UsedPercent),
+		"resets "+rl.SevenDay.ResetsAt.Local().Format("Mon Jan 2"), width)
+
 	rate := burnRatePctPerMin(pctSamples, now)
 	var etaStr string
 	switch {
 	case rate == 0:
-		etaStr = "measuring…"
+		etaStr = "measuring burn rate…"
 	default:
 		eta := etaToEmptyPct(rl.FiveHour.UsedPercent, rate)
 		if eta == 0 || now.Add(eta).After(rl.FiveHour.ResetsAt) {
@@ -538,10 +544,19 @@ func renderStatusLine2(rl RateLimits, pctSamples []pctSample, now time.Time) str
 		}
 	}
 
-	return fmt.Sprintf("5h %d%% → %s · wk %d%% → %s · %s",
-		rl.FiveHour.UsedPercent, rl.FiveHour.ResetsAt.Local().Format("3:04p"),
-		rl.SevenDay.UsedPercent, rl.SevenDay.ResetsAt.Local().Format("Mon"),
-		etaStr)
+	return fiveLine + "\n" + weekLine + "\n" + dimStyle.Render(etaStr)
+}
+
+// renderWindowLine renders one rate-limit window: "<label> <bar> <pct>%
+// ... <suffix>" with the suffix right-aligned against `width`.
+func renderWindowLine(label string, pct float64, suffix string, width int) string {
+	bar := renderBar(10, pct, thresholdColor(pct))
+	left := fmt.Sprintf("%s%s %d%%", label, bar, int(pct+0.5))
+	pad := width - lipgloss.Width(left) - lipgloss.Width(suffix)
+	if pad < 2 {
+		pad = 2
+	}
+	return left + strings.Repeat(" ", pad) + dimStyle.Render(suffix)
 }
 
 func renderLastPrompt(text string, width int) string {
