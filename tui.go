@@ -307,6 +307,13 @@ func (m model) View() string {
 		b.WriteString("\n")
 	}
 
+	// Activity feed
+	feed := buildActivityFeed(m.allEvents, 7)
+	if rendered := renderActivityFeed(feed, time.Now(), m.width); rendered != "" {
+		b.WriteString("\n")
+		b.WriteString(rendered)
+	}
+
 	// Footer (placeholder — Task 11 finalizes)
 	b.WriteString("\n")
 	elapsed := time.Since(m.lastUpdate).Truncate(time.Second)
@@ -317,6 +324,99 @@ func (m model) View() string {
 	b.WriteString(footerStyle.Render(fmt.Sprintf("sess %s · upd %s", shortID, elapsed)))
 
 	return b.String()
+}
+
+type feedEntry struct {
+	tu      ToolUse
+	at      time.Time
+	status  feedStatus
+	summary string // formatTool result; caller may append " (denied)" / " (exit N)"
+}
+
+type feedStatus int
+
+const (
+	feedRunning feedStatus = iota
+	feedSuccess
+	feedFailed
+	feedDenied
+)
+
+// buildActivityFeed walks events newest-first, pairs tool_use with its
+// matching tool_result, and returns up to `cap` entries.
+func buildActivityFeed(events []Event, cap int) []feedEntry {
+	results := map[string]ToolResult{}
+	for _, e := range events {
+		for _, tr := range e.ToolResults {
+			results[tr.ToolUseID] = tr
+		}
+	}
+	var feed []feedEntry
+	for i := len(events) - 1; i >= 0 && len(feed) < cap; i-- {
+		e := events[i]
+		for _, tu := range e.ToolUses {
+			at := parseTimestamp(e.Timestamp)
+			st := feedSuccess
+			if tr, ok := results[tu.ID]; ok {
+				if tr.IsError {
+					st = feedFailed
+				}
+			} else {
+				st = feedRunning
+			}
+			feed = append(feed, feedEntry{
+				tu: tu, at: at, status: st, summary: formatTool(tu),
+			})
+			if len(feed) >= cap {
+				break
+			}
+		}
+	}
+	return feed
+}
+
+func renderActivityFeed(feed []feedEntry, now time.Time, width int) string {
+	if len(feed) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Activity"))
+	b.WriteString("\n")
+	maxArg := width - 12
+	if maxArg < 20 {
+		maxArg = 20
+	}
+	for _, fe := range feed {
+		var glyph string
+		switch fe.status {
+		case feedRunning:
+			glyph = inProgressStyle.Render("⟳")
+		case feedSuccess:
+			glyph = completedStyle.Render("✓")
+		case feedFailed, feedDenied:
+			glyph = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("✗")
+		}
+		age := "—"
+		if !fe.at.IsZero() {
+			age = formatAge(now.Sub(fe.at))
+		}
+		summary := truncateArg(fe.summary, maxArg)
+		b.WriteString(fmt.Sprintf("  %s %3s   %s\n", glyph, age, summary))
+	}
+	return b.String()
+}
+
+func formatAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < 5*time.Minute {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return "5m+"
 }
 
 func renderTaskLine(t task) string {
