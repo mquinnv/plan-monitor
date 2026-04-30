@@ -67,3 +67,48 @@ func taskCounts(tasks []task) (completed, total int) {
 	}
 	return
 }
+
+// progressBar renders done/total filled out of `width` cells using
+// unicode block characters. Empty total is treated as zero progress.
+func progressBar(done, total, width int) string {
+	filled := 0
+	if total > 0 {
+		filled = done * width / total
+	}
+	var b strings.Builder
+	for i := 0; i < width; i++ {
+		if i < filled {
+			b.WriteString("▰")
+		} else {
+			b.WriteString("▱")
+		}
+	}
+	return b.String()
+}
+
+// capTasks returns up to `cap` tasks plus the count of hidden tasks.
+// Always includes any in-progress task even if it falls outside the cap.
+func capTasks(tasks []task, cap int) (visible []task, hidden int) {
+	if len(tasks) <= cap {
+		return tasks, 0
+	}
+	var inProgress []task
+	for _, t := range tasks {
+		if t.Status == "in_progress" {
+			inProgress = append(inProgress, t)
+		}
+	}
+	rest := make([]task, 0, cap)
+	for _, t := range tasks {
+		if t.Status == "in_progress" {
+			continue
+		}
+		if len(rest)+len(inProgress) >= cap {
+			break
+		}
+		rest = append(rest, t)
+	}
+	visible = append(rest, inProgress...)
+	hidden = len(tasks) - len(visible)
+	return visible, hidden
+}

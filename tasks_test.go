@@ -70,3 +70,49 @@ func TestTaskCounts(t *testing.T) {
 		t.Errorf("taskCounts = (%d, %d), want (2, 4)", completed, total)
 	}
 }
+
+func TestProgressBar(t *testing.T) {
+	cases := []struct {
+		done, total, width int
+		want               string
+	}{
+		{4, 7, 7, "▰▰▰▰▱▱▱"},
+		{0, 5, 5, "▱▱▱▱▱"},
+		{5, 5, 5, "▰▰▰▰▰"},
+		{0, 0, 5, "▱▱▱▱▱"},
+	}
+	for _, c := range cases {
+		got := progressBar(c.done, c.total, c.width)
+		if got != c.want {
+			t.Errorf("progressBar(%d,%d,%d) = %q, want %q", c.done, c.total, c.width, got, c.want)
+		}
+	}
+}
+
+func TestCapTasksKeepsInProgress(t *testing.T) {
+	tasks := []task{
+		{ID: "1", Status: "completed"},
+		{ID: "2", Status: "completed"},
+		{ID: "3", Status: "completed"},
+		{ID: "4", Status: "completed"},
+		{ID: "5", Status: "in_progress"},
+		{ID: "6", Status: "pending"},
+		{ID: "7", Status: "pending"},
+	}
+	visible, hidden := capTasks(tasks, 3)
+	if hidden != 4 {
+		t.Errorf("hidden = %d, want 4", hidden)
+	}
+	foundInProgress := false
+	for _, t := range visible {
+		if t.Status == "in_progress" {
+			foundInProgress = true
+		}
+	}
+	if !foundInProgress {
+		t.Errorf("visible tasks must include in_progress task")
+	}
+	if len(visible) > 3 {
+		t.Errorf("visible exceeds cap: %d", len(visible))
+	}
+}
