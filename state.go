@@ -19,10 +19,6 @@ type State struct {
 	Since    time.Time
 }
 
-// awaitingThreshold is how long a tool_use can sit without a matching
-// tool_result before we assume it's blocked on user permission.
-const awaitingThreshold = 15 * time.Second
-
 func classifyState(events []Event, now time.Time) State {
 	if len(events) == 0 {
 		return State{Kind: StateIdle, Since: now}
@@ -36,7 +32,12 @@ func classifyState(events []Event, now time.Time) State {
 		}
 	}
 
-	// Find the most recent unresolved tool_use, if any.
+	// Find the most recent unresolved tool_use, if any. We used to flip
+	// to "Awaiting" after 15s, on the theory that a long-stuck tool_use
+	// meant Claude was blocked on user permission. In practice many
+	// legitimate tools (Agent, long Bash, WebFetch) run multi-minutes,
+	// and the false-positive rate made the signal useless. Just report
+	// Tool with the elapsed duration and let the human read the clock.
 	for i := len(events) - 1; i >= 0; i-- {
 		e := events[i]
 		for _, tu := range e.ToolUses {
@@ -46,9 +47,6 @@ func classifyState(events []Event, now time.Time) State {
 			since := parseTimestamp(e.Timestamp)
 			if since.IsZero() {
 				since = now
-			}
-			if now.Sub(since) >= awaitingThreshold {
-				return State{Kind: StateAwaiting, ToolName: tu.Name, Since: since}
 			}
 			return State{Kind: StateTool, ToolName: tu.Name, Since: since}
 		}

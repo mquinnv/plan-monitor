@@ -384,27 +384,39 @@ func renderStatusbar(m model, now time.Time) string {
 	}
 
 	left := strings.Join(leftParts, " · ")
-	// Drop right-group items from the end (eta first, then wk, then 5h)
-	// only if the line genuinely won't fit — leading + trailing space + at
-	// least 1 char between groups.
-	for len(rightParts) > 0 {
-		right := strings.Join(rightParts, " · ")
-		if lipgloss.Width(left)+lipgloss.Width(right)+3 <= m.width {
-			break
-		}
-		rightParts = rightParts[:len(rightParts)-1]
-	}
 	right := strings.Join(rightParts, " · ")
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
 
 	var line string
-	if right == "" {
+	switch {
+	case right == "":
 		line = " " + left + " "
-	} else {
-		pad := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	case leftW+rightW+4 <= m.width:
+		// Plenty of room — right-align the right group with a stretched gap.
+		pad := m.width - leftW - rightW - 2
 		if pad < 1 {
 			pad = 1
 		}
 		line = " " + left + strings.Repeat(" ", pad) + right + " "
+	case leftW+rightW+5 <= m.width:
+		// Tight but everything fits inline with a single ` · ` joiner.
+		line = " " + left + " · " + right + " "
+	default:
+		// Too narrow even inline. Drop right-group items from the end
+		// (eta → wk → 5h) until packing left + " · " + right fits.
+		for len(rightParts) > 0 {
+			right = strings.Join(rightParts, " · ")
+			if leftW+lipgloss.Width(right)+5 <= m.width {
+				break
+			}
+			rightParts = rightParts[:len(rightParts)-1]
+		}
+		if len(rightParts) == 0 {
+			line = " " + left + " "
+		} else {
+			line = " " + left + " · " + right + " "
+		}
 	}
 	return statusbarStyle.Width(m.width).Render(line)
 }
