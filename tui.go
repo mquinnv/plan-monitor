@@ -127,6 +127,11 @@ func (m *model) recomputeFromEvents(now time.Time) {
 func lastUserPrompt(events []Event) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		e := events[i]
+		// last-prompt events expose the live user input even before it
+		// becomes a persisted user turn — prefer them when present.
+		if e.Type == "last-prompt" && e.UserText != "" {
+			return e.UserText
+		}
 		if e.Type != "user" {
 			continue
 		}
@@ -380,10 +385,11 @@ func renderStatusbar(m model, now time.Time) string {
 
 	left := strings.Join(leftParts, " · ")
 	// Drop right-group items from the end (eta first, then wk, then 5h)
-	// until everything fits within the pane width.
+	// only if the line genuinely won't fit — leading + trailing space + at
+	// least 1 char between groups.
 	for len(rightParts) > 0 {
 		right := strings.Join(rightParts, " · ")
-		if lipgloss.Width(left)+lipgloss.Width(right)+4 <= m.width {
+		if lipgloss.Width(left)+lipgloss.Width(right)+3 <= m.width {
 			break
 		}
 		rightParts = rightParts[:len(rightParts)-1]
@@ -395,8 +401,8 @@ func renderStatusbar(m model, now time.Time) string {
 		line = " " + left + " "
 	} else {
 		pad := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
-		if pad < 2 {
-			pad = 2
+		if pad < 1 {
+			pad = 1
 		}
 		line = " " + left + strings.Repeat(" ", pad) + right + " "
 	}

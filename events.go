@@ -158,15 +158,20 @@ func parseEvent(line string) (Event, bool) {
 		return Event{}, false
 	}
 	var raw struct {
-		Type      string          `json:"type"`
-		Timestamp string          `json:"timestamp"`
-		Message   json.RawMessage `json:"message"`
+		Type       string          `json:"type"`
+		Timestamp  string          `json:"timestamp"`
+		Message    json.RawMessage `json:"message"`
+		LastPrompt string          `json:"lastPrompt"` // present on type=last-prompt events
 	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return Event{}, false
 	}
 
 	ev := Event{Type: raw.Type, Timestamp: raw.Timestamp, RawLine: line}
+
+	if raw.Type == "last-prompt" && raw.LastPrompt != "" {
+		ev.UserText = raw.LastPrompt
+	}
 
 	if len(raw.Message) > 0 {
 		var msg struct {

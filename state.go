@@ -54,8 +54,14 @@ func classifyState(events []Event, now time.Time) State {
 		}
 	}
 
-	// No unresolved tool_use. Last event determines state.
-	last := events[len(events)-1]
+	// No unresolved tool_use. Last *conversation* event determines state.
+	// Claude Code interleaves bookkeeping events (attachment, last-prompt,
+	// file-history-snapshot, queue-operation, system) with real
+	// user/assistant turns; only the latter describe conversational state.
+	last, ok := lastConversationEvent(events)
+	if !ok {
+		return State{Kind: StateIdle, Since: now}
+	}
 	switch last.Type {
 	case "assistant":
 		if last.UserText != "" {
@@ -63,11 +69,23 @@ func classifyState(events []Event, now time.Time) State {
 		}
 		return State{Kind: StateThinking, Since: parseTimestampOr(last.Timestamp, now)}
 	case "user":
-		// User turn (likely a tool_result with no new assistant response yet)
-		// → Claude is about to think.
+		// User turn (real prompt or tool_result with no new assistant yet) →
+		// Claude is about to think.
 		return State{Kind: StateThinking, Since: parseTimestampOr(last.Timestamp, now)}
 	}
 	return State{Kind: StateIdle, Since: now}
+}
+
+// lastConversationEvent returns the newest user or assistant event,
+// skipping bookkeeping types.
+func lastConversationEvent(events []Event) (Event, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		t := events[i].Type
+		if t == "user" || t == "assistant" {
+			return events[i], true
+		}
+	}
+	return Event{}, false
 }
 
 func parseTimestamp(s string) time.Time {

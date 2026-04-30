@@ -52,6 +52,24 @@ func TestClassifyAwaitingHeuristic(t *testing.T) {
 	}
 }
 
+func TestClassifySkipsBookkeepingEvents(t *testing.T) {
+	// Claude Code interleaves "attachment", "last-prompt", "system", etc.
+	// between user/assistant turns. Those bookkeeping events must NOT
+	// be treated as the "last event" — Idle would be wrong while Claude
+	// is still mid-loop.
+	now := time.Now()
+	events := []Event{
+		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}, Timestamp: now.Add(-2 * time.Second).Format(time.RFC3339)},
+		{Type: "user", ToolResults: []ToolResult{{ToolUseID: "t1"}}, Timestamp: now.Add(-1 * time.Second).Format(time.RFC3339)},
+		{Type: "attachment"},
+		{Type: "last-prompt", UserText: "tail of user input"},
+	}
+	got := classifyState(events, now)
+	if got.Kind != StateThinking {
+		t.Errorf("got %v, want StateThinking (last conversation event was user/tool_result)", got.Kind)
+	}
+}
+
 func TestClassifyError(t *testing.T) {
 	events := []Event{
 		{Type: "assistant", ToolUses: []ToolUse{{ID: "t1", Name: "Bash"}}},
