@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -126,13 +127,19 @@ func (r *EventReader) Tail() ([]Event, error) {
 
 func parseLines(data []byte, dropPartial bool) []Event {
 	var events []Event
-	scanner := bufio.NewScanner(bytesReader(data))
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 1024*1024), 4*1024*1024)
 	hasTrailingNL := len(data) > 0 && data[len(data)-1] == '\n'
 
 	var lines []string
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		// Oversized lines (>4 MiB) are dropped here; not fatal — we
+		// return whatever we managed to parse so the panel keeps
+		// rendering rather than crashing the TUI.
+		_ = err
 	}
 	if dropPartial && !hasTrailingNL && len(lines) > 0 {
 		lines = lines[:len(lines)-1]
@@ -144,24 +151,6 @@ func parseLines(data []byte, dropPartial bool) []Event {
 		}
 	}
 	return events
-}
-
-func bytesReader(b []byte) *bufio.Reader {
-	return bufio.NewReader(&byteSliceReader{b: b})
-}
-
-type byteSliceReader struct {
-	b   []byte
-	pos int
-}
-
-func (r *byteSliceReader) Read(p []byte) (int, error) {
-	if r.pos >= len(r.b) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b[r.pos:])
-	r.pos += n
-	return n, nil
 }
 
 func parseEvent(line string) (Event, bool) {
@@ -198,42 +187,41 @@ func extractContent(ev *Event, content json.RawMessage) {
 	if len(content) == 0 {
 		return
 	}
+	// Plain string content (e.g. simple user message).
 	var asString string
 	if err := json.Unmarshal(content, &asString); err == nil {
 		ev.UserText = asString
 		return
 	}
-	var blocks []map[string]interface{}
+	var blocks []json.RawMessage
 	if err := json.Unmarshal(content, &blocks); err != nil {
 		return
 	}
-	for _, b := range blocks {
-		switch b["type"] {
+	for _, raw := range blocks {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			continue
+		}
+		switch head.Type {
 		case "text":
-			if s, ok := b["text"].(string); ok && ev.UserText == "" {
-				ev.UserText = s
+			var t struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(raw, &t); err == nil && ev.UserText == "" {
+				ev.UserText = t.Text
 			}
 		case "tool_use":
-			tu := ToolUse{}
-			if id, ok := b["id"].(string); ok {
-				tu.ID = id
+			var tu ToolUse
+			if err := json.Unmarshal(raw, &tu); err == nil {
+				ev.ToolUses = append(ev.ToolUses, tu)
 			}
-			if name, ok := b["name"].(string); ok {
-				tu.Name = name
-			}
-			if inp, ok := b["input"].(map[string]interface{}); ok {
-				tu.Input = inp
-			}
-			ev.ToolUses = append(ev.ToolUses, tu)
 		case "tool_result":
-			tr := ToolResult{}
-			if id, ok := b["tool_use_id"].(string); ok {
-				tr.ToolUseID = id
+			var tr ToolResult
+			if err := json.Unmarshal(raw, &tr); err == nil {
+				ev.ToolResults = append(ev.ToolResults, tr)
 			}
-			if e, ok := b["is_error"].(bool); ok {
-				tr.IsError = e
-			}
-			ev.ToolResults = append(ev.ToolResults, tr)
 		}
 	}
 }
