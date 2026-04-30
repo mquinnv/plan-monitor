@@ -352,7 +352,7 @@ func renderStatusbar(m model, now time.Time) string {
 		parts = append(parts, shortModel(m.modelName))
 	}
 	parts = append(parts, fmt.Sprintf("ctx %s %d%%",
-		renderBar(5, m.contextPct, thresholdColor(m.contextPct)),
+		renderBar(10, m.contextPct, thresholdColor(m.contextPct)),
 		int(m.contextPct+0.5)))
 
 	if m.rateOK {
@@ -360,11 +360,11 @@ func renderStatusbar(m model, now time.Time) string {
 		wkPct := float64(m.rateLimits.SevenDay.UsedPercent)
 		parts = append(parts,
 			fmt.Sprintf("5h %s %d%%→%s",
-				renderBar(5, fhPct, thresholdColor(fhPct)),
+				renderBar(10, fhPct, thresholdColor(fhPct)),
 				m.rateLimits.FiveHour.UsedPercent,
 				m.rateLimits.FiveHour.ResetsAt.Local().Format("3:04p")),
 			fmt.Sprintf("wk %s %d%%→%s",
-				renderBar(5, wkPct, thresholdColor(wkPct)),
+				renderBar(10, wkPct, thresholdColor(wkPct)),
 				m.rateLimits.SevenDay.UsedPercent,
 				m.rateLimits.SevenDay.ResetsAt.Local().Format("Mon")),
 		)
