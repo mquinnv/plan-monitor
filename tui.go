@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -294,8 +295,12 @@ func (m model) View() string {
 	// Tasks
 	completed, total := taskCounts(m.tasks)
 	b.WriteString("\n")
-	bar := progressBar(completed, total, 7)
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Tasks %s %d/%d", bar, completed, total)))
+	taskPct := 0.0
+	if total > 0 {
+		taskPct = 100.0 * float64(completed) / float64(total)
+	}
+	taskBar := renderBar(10, taskPct, "#7D56F4")
+	b.WriteString(headerStyle.Render(fmt.Sprintf("Tasks %s %d/%d", taskBar, completed, total)))
 	b.WriteString("\n")
 	visible, hidden := capTasks(m.tasks, 10)
 	for _, t := range visible {
@@ -477,15 +482,42 @@ func renderStatusLine1(s State, model string, ctxPct float64, now time.Time) str
 	}
 	modelShort := shortModel(model)
 
-	ctxColor := lipgloss.NewStyle()
-	if ctxPct >= 85 {
-		ctxColor = ctxColor.Foreground(lipgloss.Color("#EF4444"))
-	} else if ctxPct >= 70 {
-		ctxColor = ctxColor.Foreground(lipgloss.Color("#FFCC00"))
-	}
-	ctxStr := ctxColor.Render(fmt.Sprintf("ctx %d%%", int(ctxPct+0.5)))
+	bar := renderBar(10, ctxPct, thresholdColor(ctxPct))
+	pctStr := fmt.Sprintf("%d%%", int(ctxPct+0.5))
+	budget := formatBudget(contextBudget(model))
+	ctxStr := fmt.Sprintf("ctx %s %s (%s)", bar, pctStr, budget)
 
 	return fmt.Sprintf("%s %s %s · %s · %s", dot, s.Label(), durStr, modelShort, ctxStr)
+}
+
+// renderBar draws a styled progress bar at pct (0-100) with given width and
+// solid fill color. Uses bubbles/progress for consistent character rendering.
+func renderBar(width int, pct float64, color string) string {
+	p := progress.New(
+		progress.WithSolidFill(color),
+		progress.WithoutPercentage(),
+		progress.WithWidth(width),
+	)
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return p.ViewAs(pct / 100.0)
+}
+
+// thresholdColor returns the bar fill color for a usage percentage:
+// green default, yellow >=70, red >=85.
+func thresholdColor(pct float64) string {
+	switch {
+	case pct >= 85:
+		return "#EF4444"
+	case pct >= 70:
+		return "#FFCC00"
+	default:
+		return "#04B575"
+	}
 }
 
 func renderStatusLine2(rl RateLimits, pctSamples []pctSample, now time.Time) string {
@@ -518,19 +550,40 @@ func renderLastPrompt(text string, width int) string {
 	return promptStyle.Render("You: " + truncateArg(one, max))
 }
 
+// shortModel renders a model id as "<family> <major>.<minor>" with an
+// optional " 1M" suffix for the [1m] context variant. Examples:
+//
+//	claude-opus-4-7        → "opus 4.7"
+//	claude-opus-4-7[1m]    → "opus 4.7 1M"
+//	claude-haiku-4-5-20251 → "haiku 4.5"
+//	(empty)                → "—"
 func shortModel(m string) string {
-	switch {
-	case strings.Contains(m, "opus"):
-		return "opus"
-	case strings.Contains(m, "sonnet"):
-		return "sonnet"
-	case strings.Contains(m, "haiku"):
-		return "haiku"
-	case m == "":
+	if m == "" {
 		return "—"
-	default:
-		return m
 	}
+	suffix := ""
+	if strings.HasSuffix(m, "[1m]") {
+		suffix = " 1M"
+		m = strings.TrimSuffix(m, "[1m]")
+	}
+	m = strings.TrimPrefix(m, "claude-")
+	parts := strings.Split(m, "-")
+	if len(parts) >= 3 && allDigits(parts[1]) && allDigits(parts[2]) {
+		return parts[0] + " " + parts[1] + "." + parts[2] + suffix
+	}
+	return m + suffix
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func countErrors(events []Event) int {

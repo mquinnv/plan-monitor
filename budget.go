@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -18,13 +19,7 @@ var modelContextBudget = map[string]int{
 const defaultContextBudget = 200_000
 
 func contextPercent(model string, u Usage) float64 {
-	budget := defaultContextBudget
-	for k, v := range modelContextBudget {
-		if model == k || strings.HasPrefix(model, k) {
-			budget = v
-			break
-		}
-	}
+	budget := contextBudget(model)
 	total := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens + u.OutputTokens
 	return 100.0 * float64(total) / float64(budget)
 }
@@ -131,6 +126,39 @@ func etaToEmptyPct(usedPct int, ratePctPerMin float64) time.Duration {
 
 func totalTokens(u Usage) int {
 	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens + u.OutputTokens
+}
+
+// contextBudget returns the token budget for a model. Exact match wins;
+// otherwise the longest matching prefix wins so that variants like
+// "claude-opus-4-7[1m]" don't fall back to the shorter "claude-opus-4-7"
+// entry.
+func contextBudget(model string) int {
+	if v, ok := modelContextBudget[model]; ok {
+		return v
+	}
+	bestLen := 0
+	best := defaultContextBudget
+	for k, v := range modelContextBudget {
+		if strings.HasPrefix(model, k) && len(k) > bestLen {
+			bestLen = len(k)
+			best = v
+		}
+	}
+	return best
+}
+
+// formatBudget renders a token count as "200k" or "1M".
+func formatBudget(n int) string {
+	if n >= 1_000_000 {
+		if n%1_000_000 == 0 {
+			return fmt.Sprintf("%dM", n/1_000_000)
+		}
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // defaultRateLimitsPath returns the abtop statusline cache path. Override
