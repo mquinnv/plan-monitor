@@ -314,14 +314,19 @@ func (m model) View() string {
 		b.WriteString(rendered)
 	}
 
-	// Footer (placeholder — Task 11 finalizes)
+	// Footer
 	b.WriteString("\n")
 	elapsed := time.Since(m.lastUpdate).Truncate(time.Second)
 	shortID := m.sessionID
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
-	b.WriteString(footerStyle.Render(fmt.Sprintf("sess %s · upd %s", shortID, elapsed)))
+	errCount := countErrors(m.allEvents)
+	errStr := ""
+	if errCount > 0 {
+		errStr = " · " + lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render(fmt.Sprintf("%d error%s", errCount, plural(errCount)))
+	}
+	b.WriteString(footerStyle.Render(fmt.Sprintf("sess %s · upd %s", shortID, elapsed)) + errStr)
 
 	return b.String()
 }
@@ -526,6 +531,25 @@ func shortModel(m string) string {
 	default:
 		return m
 	}
+}
+
+func countErrors(events []Event) int {
+	n := 0
+	for _, e := range events {
+		for _, tr := range e.ToolResults {
+			if tr.IsError {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func formatDuration(d time.Duration) string {
