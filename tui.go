@@ -47,10 +47,6 @@ var (
 	statusbarStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#1a1a1a")).
 			Foreground(lipgloss.Color("#cccccc"))
-	statusbarErrStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("#1a1a1a")).
-				Foreground(lipgloss.Color("#EF4444")).
-				Bold(true)
 	dirtyBranch = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00"))
 	promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true)
 )
@@ -268,7 +264,7 @@ func (m model) View() string {
 	var top strings.Builder
 
 	// Header
-	top.WriteString(renderHeader(m.cwd, m.gitStatus))
+	top.WriteString(renderHeader(m.cwd, m.gitStatus, m.sessionID, m.width))
 	top.WriteString("\n")
 
 	// Last prompt — anchors "what was asked"
@@ -328,7 +324,7 @@ func (m model) View() string {
 	return topStr + strings.Repeat("\n", gap) + statusbar
 }
 
-// renderStatusbar packs all session/state/budget info onto a single
+// renderStatusbar packs state and budget info onto a single
 // background-filled line at the bottom of the pane.
 func renderStatusbar(m model, now time.Time) string {
 	var dot string
@@ -355,12 +351,22 @@ func renderStatusbar(m model, now time.Time) string {
 	if m.modelName != "" {
 		parts = append(parts, shortModel(m.modelName))
 	}
-	parts = append(parts, fmt.Sprintf("ctx %d%%", int(m.contextPct+0.5)))
+	parts = append(parts, fmt.Sprintf("ctx %s %d%%",
+		renderBar(5, m.contextPct, thresholdColor(m.contextPct)),
+		int(m.contextPct+0.5)))
 
 	if m.rateOK {
+		fhPct := float64(m.rateLimits.FiveHour.UsedPercent)
+		wkPct := float64(m.rateLimits.SevenDay.UsedPercent)
 		parts = append(parts,
-			fmt.Sprintf("5h %d%%→%s", m.rateLimits.FiveHour.UsedPercent, m.rateLimits.FiveHour.ResetsAt.Local().Format("3:04p")),
-			fmt.Sprintf("wk %d%%→%s", m.rateLimits.SevenDay.UsedPercent, m.rateLimits.SevenDay.ResetsAt.Local().Format("Mon")),
+			fmt.Sprintf("5h %s %d%%→%s",
+				renderBar(5, fhPct, thresholdColor(fhPct)),
+				m.rateLimits.FiveHour.UsedPercent,
+				m.rateLimits.FiveHour.ResetsAt.Local().Format("3:04p")),
+			fmt.Sprintf("wk %s %d%%→%s",
+				renderBar(5, wkPct, thresholdColor(wkPct)),
+				m.rateLimits.SevenDay.UsedPercent,
+				m.rateLimits.SevenDay.ResetsAt.Local().Format("Mon")),
 		)
 		rate := burnRatePctPerMin(m.pctSamples, now)
 		if rate > 0 {
@@ -369,15 +375,6 @@ func renderStatusbar(m model, now time.Time) string {
 				parts = append(parts, "empty in "+formatDuration(eta))
 			}
 		}
-	}
-
-	shortID := m.sessionID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
-	parts = append(parts, "sess "+shortID)
-	if errCount := countErrors(m.allEvents); errCount > 0 {
-		parts = append(parts, statusbarErrStyle.Render(fmt.Sprintf("%d error%s", errCount, plural(errCount))))
 	}
 
 	line := " " + strings.Join(parts, " · ") + " "
@@ -492,19 +489,33 @@ func renderTaskLine(t task) string {
 	}
 }
 
-func renderHeader(cwd string, g GitStatus) string {
+func renderHeader(cwd string, g GitStatus, sessionID string, width int) string {
 	prefix := titleStyle.Render("▸ plan-monitor")
 	name := projectBasename(cwd)
-	if g.Branch == "" {
-		return prefix + " · " + name
+	left := prefix + " · " + name
+	if g.Branch != "" {
+		branchStr := "(" + g.Branch + ")"
+		if g.Dirty {
+			branchStr = dirtyBranch.Render(branchStr)
+		} else {
+			branchStr = branchStyle.Render(branchStr)
+		}
+		left = left + " " + branchStr
 	}
-	branchStr := "(" + g.Branch + ")"
-	if g.Dirty {
-		branchStr = dirtyBranch.Render(branchStr)
-	} else {
-		branchStr = branchStyle.Render(branchStr)
+
+	if sessionID == "" || width <= 0 {
+		return left
 	}
-	return prefix + " · " + name + " " + branchStr
+	shortID := sessionID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	right := dimStyle.Render("sess " + shortID)
+	pad := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if pad < 2 {
+		return left + "  " + right
+	}
+	return left + strings.Repeat(" ", pad) + right
 }
 
 // renderBar draws a styled progress bar at pct (0-100) with given width and
@@ -580,25 +591,6 @@ func allDigits(s string) bool {
 		}
 	}
 	return true
-}
-
-func countErrors(events []Event) int {
-	n := 0
-	for _, e := range events {
-		for _, tr := range e.ToolResults {
-			if tr.IsError {
-				n++
-			}
-		}
-	}
-	return n
-}
-
-func plural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
 }
 
 func formatDuration(d time.Duration) string {
