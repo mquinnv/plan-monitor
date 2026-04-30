@@ -379,6 +379,15 @@ func renderStatusbar(m model, now time.Time) string {
 	}
 
 	left := strings.Join(leftParts, " · ")
+	// Drop right-group items from the end (eta first, then wk, then 5h)
+	// until everything fits within the pane width.
+	for len(rightParts) > 0 {
+		right := strings.Join(rightParts, " · ")
+		if lipgloss.Width(left)+lipgloss.Width(right)+4 <= m.width {
+			break
+		}
+		rightParts = rightParts[:len(rightParts)-1]
+	}
 	right := strings.Join(rightParts, " · ")
 
 	var line string

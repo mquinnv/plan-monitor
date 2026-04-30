@@ -19,8 +19,14 @@ var modelContextBudget = map[string]int{
 const defaultContextBudget = 200_000
 
 func contextPercent(model string, u Usage) float64 {
-	budget := contextBudget(model)
 	total := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens + u.OutputTokens
+	budget := contextBudget(model)
+	// Claude Code does not write the [1m]/variant suffix to the JSONL, so the
+	// model string lookup may underreport the budget. If observed usage
+	// exceeds the table value, infer the larger context variant.
+	if total > budget {
+		budget = 1_000_000
+	}
 	return 100.0 * float64(total) / float64(budget)
 }
 
