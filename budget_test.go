@@ -47,6 +47,23 @@ func TestReadRateLimits(t *testing.T) {
 	}
 }
 
+func TestReadRateLimitsFloatPercent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rate-limits.json")
+	body := `{"source":"claude","updated_at":1777666707,` +
+		`"five_hour":{"used_percentage":14.000000000000002,"resets_at":1777678800},` +
+		`"seven_day":{"used_percentage":28.6,"resets_at":1777928400}}`
+	os.WriteFile(path, []byte(body), 0o644)
+
+	rl, err := readRateLimits(path)
+	if err != nil {
+		t.Fatalf("readRateLimits error: %v", err)
+	}
+	if rl.FiveHour.UsedPercent != 14 || rl.SevenDay.UsedPercent != 29 {
+		t.Errorf("percentages = %d/%d, want 14/29", rl.FiveHour.UsedPercent, rl.SevenDay.UsedPercent)
+	}
+}
+
 func TestReadRateLimitsMissingFile(t *testing.T) {
 	_, err := readRateLimits("/nonexistent/path.json")
 	if err == nil {

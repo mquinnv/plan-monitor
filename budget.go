@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -47,12 +48,12 @@ type rawRateLimitsFile struct {
 	Source    string `json:"source"`
 	UpdatedAt int64  `json:"updated_at"`
 	FiveHour  struct {
-		UsedPercentage int   `json:"used_percentage"`
-		ResetsAt       int64 `json:"resets_at"`
+		UsedPercentage float64 `json:"used_percentage"`
+		ResetsAt       int64   `json:"resets_at"`
 	} `json:"five_hour"`
 	SevenDay struct {
-		UsedPercentage int   `json:"used_percentage"`
-		ResetsAt       int64 `json:"resets_at"`
+		UsedPercentage float64 `json:"used_percentage"`
+		ResetsAt       int64   `json:"resets_at"`
 	} `json:"seven_day"`
 }
 
@@ -70,11 +71,11 @@ func readRateLimits(path string) (RateLimits, error) {
 		Source:    raw.Source,
 		UpdatedAt: time.Unix(raw.UpdatedAt, 0),
 		FiveHour: Window{
-			UsedPercent: raw.FiveHour.UsedPercentage,
+			UsedPercent: int(math.Round(raw.FiveHour.UsedPercentage)),
 			ResetsAt:    time.Unix(raw.FiveHour.ResetsAt, 0),
 		},
 		SevenDay: Window{
-			UsedPercent: raw.SevenDay.UsedPercentage,
+			UsedPercent: int(math.Round(raw.SevenDay.UsedPercentage)),
 			ResetsAt:    time.Unix(raw.SevenDay.ResetsAt, 0),
 		},
 	}, nil
