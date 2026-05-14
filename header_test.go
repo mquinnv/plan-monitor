@@ -38,6 +38,39 @@ func TestGitInfoCleanRepo(t *testing.T) {
 	}
 }
 
+func TestGitInfoLinkedWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	main := filepath.Join(root, "main")
+	wt := filepath.Join(root, "wt")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, main, "init", "-q", "-b", "main")
+	runGit(t, main, "config", "user.email", "test@test")
+	runGit(t, main, "config", "user.name", "test")
+	runGit(t, main, "commit", "--allow-empty", "-m", "init")
+	runGit(t, main, "worktree", "add", "-b", "feature", wt)
+
+	primary := gitInfo(main)
+	if primary.IsWorktree {
+		t.Errorf("primary working tree should not be flagged IsWorktree")
+	}
+	if primary.Branch != "main" {
+		t.Errorf("primary branch = %q, want main", primary.Branch)
+	}
+
+	linked := gitInfo(wt)
+	if !linked.IsWorktree {
+		t.Errorf("linked worktree should be flagged IsWorktree")
+	}
+	if linked.Branch != "feature" {
+		t.Errorf("linked branch = %q, want feature", linked.Branch)
+	}
+}
+
 func TestGitInfoDirtyRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

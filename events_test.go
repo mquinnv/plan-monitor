@@ -101,6 +101,42 @@ func TestEventReaderHandlesPartialFinalLine(t *testing.T) {
 	}
 }
 
+func TestEventReaderCapturesCwd(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	body := `{"type":"user","cwd":"/path/from/launch","message":{"content":"hi"}}` + "\n" +
+		`{"type":"assistant","cwd":"/path/after/cd","message":{"content":[{"type":"text","text":"ok"}]}}` + "\n"
+	os.WriteFile(path, []byte(body), 0o644)
+
+	r := newEventReader(path)
+	r.SeedFromEnd(10)
+	events, err := r.Seeded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Cwd != "/path/from/launch" || events[1].Cwd != "/path/after/cd" {
+		t.Fatalf("cwd capture wrong: %+v", events)
+	}
+}
+
+func TestLatestEventCwd(t *testing.T) {
+	got := latestEventCwd([]Event{
+		{Cwd: "/old"},
+		{Cwd: ""},
+		{Cwd: "/new"},
+		{Cwd: ""},
+	}, "/fallback")
+	if got != "/new" {
+		t.Errorf("latestEventCwd = %q, want /new", got)
+	}
+	if latestEventCwd(nil, "/fallback") != "/fallback" {
+		t.Errorf("empty events should return fallback")
+	}
+	if latestEventCwd([]Event{{Cwd: ""}}, "/fallback") != "/fallback" {
+		t.Errorf("no event cwd should return fallback")
+	}
+}
+
 func TestEventReaderToolUseAndResult(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")

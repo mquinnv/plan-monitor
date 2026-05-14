@@ -49,6 +49,18 @@ var (
 			Foreground(lipgloss.Color("#cccccc"))
 	dirtyBranch = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFCC00"))
 	promptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true)
+
+	worktreeBadge = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FAFAFA")).
+			Background(lipgloss.Color("#EF4444")).
+			Padding(0, 1)
+
+	siblingBadge = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#1a1a1a")).
+			Background(lipgloss.Color("#FFCC00")).
+			Padding(0, 1)
 )
 
 type tickMsg time.Time
@@ -58,8 +70,15 @@ type model struct {
 	tasksDir  string
 	plansDir  string
 	jsonlPath string
-	cwd       string
+	cwd       string // startup cwd (anchors JSONL/plan discovery)
 	sessionID string
+
+	// monitoredCwd is the cwd of the watched Claude session, as read from
+	// the latest JSONL event's "cwd" field. Falls back to startup cwd until
+	// the first event is parsed. This is what header + gitInfo display, so
+	// that a Claude running in a different directory (e.g. a worktree) is
+	// reflected accurately even when plan-monitor was launched elsewhere.
+	monitoredCwd string
 
 	// Persistent state
 	reader         *EventReader
@@ -78,6 +97,11 @@ type model struct {
 	tasks      []task
 	lastPrompt string
 	gitStatus  GitStatus
+
+	// siblingCount is the number of other Claude sessions writing into the
+	// same project dir within the recent activity window. >0 means likely
+	// concurrent Claudes — flagged with a loud header badge.
+	siblingCount int
 
 	// UI
 	lastUpdate time.Time
@@ -98,14 +122,26 @@ func newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID string) model {
 		plansDir:       plansDir,
 		jsonlPath:      jsonlPath,
 		cwd:            cwd,
+		monitoredCwd:   latestEventCwd(seeded, cwd),
 		sessionID:      sessionID,
 		reader:         r,
 		allEvents:      seeded,
 		rateLimitsPath: defaultRateLimitsPath(),
-		gitStatus:      gitInfo(cwd),
 	}
+	m.gitStatus = gitInfo(m.monitoredCwd)
 	m.recomputeFromEvents(time.Now())
 	return m
+}
+
+// latestEventCwd returns the cwd recorded on the most recent event that has
+// one. Falls back to the provided fallback when no event has populated it.
+func latestEventCwd(events []Event, fallback string) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Cwd != "" {
+			return events[i].Cwd
+		}
+	}
+	return fallback
 }
 
 func (m *model) recomputeFromEvents(now time.Time) {
@@ -173,20 +209,28 @@ func (m model) pollData() tea.Cmd {
 	plansDir := m.plansDir
 	jsonlPath := m.jsonlPath
 	cwd := m.cwd
+	monitoredCwd := m.monitoredCwd
 	rlPath := m.rateLimitsPath
 	return func() tea.Msg {
 		newEvents, _ := reader.Tail()
 		tasks, _ := readTasks(tasksDir)
 		title, step := discoverPlan(plansDir, jsonlPath, cwd)
-		git := gitInfo(cwd)
+		// Prefer the newest cwd from this batch of events; otherwise stick
+		// with what the model already knew.
+		gitCwd := latestEventCwd(newEvents, monitoredCwd)
+		git := gitInfo(gitCwd)
 		rl, rlErr := readRateLimits(rlPath)
+		now := time.Now()
+		siblings := liveSiblingSessions(jsonlPath, now, 2*time.Minute)
 		return dataMsg{
-			time:         time.Now(),
+			time:         now,
 			newEvents:    newEvents,
 			tasks:        tasks,
 			planTitle:    title,
 			planStep:     step,
+			monitoredCwd: gitCwd,
 			gitStatus:    git,
+			siblingCount: siblings,
 			rateLimits:   rl,
 			rateLimitErr: rlErr,
 		}
@@ -199,7 +243,9 @@ type dataMsg struct {
 	tasks        []task
 	planTitle    string
 	planStep     string
+	monitoredCwd string
 	gitStatus    GitStatus
+	siblingCount int
 	rateLimits   RateLimits
 	rateLimitErr error
 }
@@ -229,7 +275,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.planTitle = msg.planTitle
 		m.planStep = msg.planStep
+		m.monitoredCwd = msg.monitoredCwd
 		m.gitStatus = msg.gitStatus
+		m.siblingCount = msg.siblingCount
 		if len(msg.newEvents) > 0 {
 			m.allEvents = append(m.allEvents, msg.newEvents...)
 			if len(m.allEvents) > 1000 {
@@ -269,7 +317,7 @@ func (m model) View() string {
 	var top strings.Builder
 
 	// Header
-	top.WriteString(renderHeader(m.cwd, m.gitStatus, m.sessionID, m.width))
+	top.WriteString(renderHeader(m.monitoredCwd, m.gitStatus, m.siblingCount, m.sessionID, m.width))
 	top.WriteString("\n")
 
 	// Last prompt — anchors "what was asked"
@@ -290,24 +338,23 @@ func (m model) View() string {
 		}
 	}
 
-	// Tasks
+	// Tasks — hide the whole block when there are none.
 	completed, total := taskCounts(m.tasks)
-	top.WriteString("\n")
-	taskPct := 0.0
 	if total > 0 {
-		taskPct = 100.0 * float64(completed) / float64(total)
-	}
-	taskBar := renderBar(10, taskPct, "#7D56F4")
-	top.WriteString(headerStyle.Render(fmt.Sprintf("Tasks %s %d/%d", taskBar, completed, total)))
-	top.WriteString("\n")
-	visible, hidden := capTasks(m.tasks, 10)
-	for _, t := range visible {
-		top.WriteString(renderTaskLine(t))
+		taskPct := 100.0 * float64(completed) / float64(total)
+		taskBar := renderBar(10, taskPct, "#7D56F4")
 		top.WriteString("\n")
-	}
-	if hidden > 0 {
-		top.WriteString(pendingStyle.Render(fmt.Sprintf("  …and %d more", hidden)))
+		top.WriteString(headerStyle.Render(fmt.Sprintf("Tasks %s %d/%d", taskBar, completed, total)))
 		top.WriteString("\n")
+		visible, hidden := capTasks(m.tasks, 10)
+		for _, t := range visible {
+			top.WriteString(renderTaskLine(t))
+			top.WriteString("\n")
+		}
+		if hidden > 0 {
+			top.WriteString(pendingStyle.Render(fmt.Sprintf("  …and %d more", hidden)))
+			top.WriteString("\n")
+		}
 	}
 
 	// Activity feed
@@ -529,7 +576,7 @@ func renderTaskLine(t task) string {
 	}
 }
 
-func renderHeader(cwd string, g GitStatus, sessionID string, width int) string {
+func renderHeader(cwd string, g GitStatus, siblingCount int, sessionID string, width int) string {
 	prefix := titleStyle.Render("▸ plan-monitor")
 	name := projectBasename(cwd)
 	left := prefix + " · " + name
@@ -541,6 +588,16 @@ func renderHeader(cwd string, g GitStatus, sessionID string, width int) string {
 			branchStr = branchStyle.Render(branchStr)
 		}
 		left = left + " " + branchStr
+	}
+	if g.IsWorktree {
+		left = left + " " + worktreeBadge.Render("⚠ WORKTREE")
+	}
+	if siblingCount > 0 {
+		label := fmt.Sprintf("⚠ %d OTHER CLAUDE HERE", siblingCount)
+		if siblingCount > 1 {
+			label = fmt.Sprintf("⚠ %d OTHER CLAUDES HERE", siblingCount)
+		}
+		left = left + " " + siblingBadge.Render(label)
 	}
 
 	if sessionID == "" || width <= 0 {

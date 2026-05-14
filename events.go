@@ -30,6 +30,7 @@ type ToolResult struct {
 type Event struct {
 	Type        string
 	Timestamp   string
+	Cwd         string
 	Model       string
 	UserText    string
 	ToolUses    []ToolUse
@@ -160,6 +161,7 @@ func parseEvent(line string) (Event, bool) {
 	var raw struct {
 		Type       string          `json:"type"`
 		Timestamp  string          `json:"timestamp"`
+		Cwd        string          `json:"cwd"`
 		Message    json.RawMessage `json:"message"`
 		LastPrompt string          `json:"lastPrompt"` // present on type=last-prompt events
 	}
@@ -167,7 +169,7 @@ func parseEvent(line string) (Event, bool) {
 		return Event{}, false
 	}
 
-	ev := Event{Type: raw.Type, Timestamp: raw.Timestamp, RawLine: line}
+	ev := Event{Type: raw.Type, Timestamp: raw.Timestamp, Cwd: raw.Cwd, RawLine: line}
 
 	if raw.Type == "last-prompt" && raw.LastPrompt != "" {
 		ev.UserText = raw.LastPrompt
