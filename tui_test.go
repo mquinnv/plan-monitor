@@ -1,6 +1,62 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// When the active Claude session in a directory rotates (a newer .jsonl
+// appears), an MRA-following monitor must rebind to it: swapping the reader,
+// session ID, tasks dir, and reseeding/recomputing derived state. This is the
+// fix for the "goes stale on long-running sessions" bug — the monitor was
+// frozen to whatever file was newest at launch.
+func TestSwitchSessionRebindsToNewerFile(t *testing.T) {
+	dir := t.TempDir()
+	tasksBase := filepath.Join(dir, "tasks")
+	old := filepath.Join(dir, "old-sess.jsonl")
+	if err := os.WriteFile(old, []byte(`{"type":"user","timestamp":"2026-05-15T10:00:00Z","message":{"content":"old prompt"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{
+		jsonlPath:    old,
+		sessionID:    "old-sess",
+		tasksDir:     filepath.Join(tasksBase, "old-sess"),
+		cwd:          "/proj",
+		followActive: true,
+		reader:       newEventReader(old),
+	}
+	m.reader.SeedFromEnd(500)
+	m.allEvents, _ = m.reader.Seeded()
+	m.recomputeFromEvents(time.Now())
+	if m.lastPrompt != "old prompt" {
+		t.Fatalf("precondition: lastPrompt = %q, want %q", m.lastPrompt, "old prompt")
+	}
+
+	// A newer session file appears in the same directory.
+	newp := filepath.Join(dir, "new-sess.jsonl")
+	if err := os.WriteFile(newp, []byte(`{"type":"user","timestamp":"2026-05-29T10:00:00Z","message":{"content":"new prompt"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m.switchSession(newp, time.Now())
+
+	if m.jsonlPath != newp {
+		t.Errorf("jsonlPath = %q, want %q", m.jsonlPath, newp)
+	}
+	if m.sessionID != "new-sess" {
+		t.Errorf("sessionID = %q, want %q", m.sessionID, "new-sess")
+	}
+	wantTasks := filepath.Join(tasksBase, "new-sess")
+	if m.tasksDir != wantTasks {
+		t.Errorf("tasksDir = %q, want %q", m.tasksDir, wantTasks)
+	}
+	if m.lastPrompt != "new prompt" {
+		t.Errorf("lastPrompt = %q, want %q (reseed+recompute from new file)", m.lastPrompt, "new prompt")
+	}
+}
 
 func TestShortModel(t *testing.T) {
 	cases := []struct {

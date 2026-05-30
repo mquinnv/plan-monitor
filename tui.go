@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -73,6 +74,12 @@ type model struct {
 	cwd       string // startup cwd (anchors JSONL/plan discovery)
 	sessionID string
 
+	// followActive makes the monitor re-bind to the most-recently-active
+	// .jsonl in the project dir each poll, so it follows a session that
+	// rotates underneath it (new session, /clear, resume, compaction).
+	// Disabled when an explicit --session was given (the user pinned it).
+	followActive bool
+
 	// monitoredCwd is the cwd of the watched Claude session, as read from
 	// the latest JSONL event's "cwd" field. Falls back to startup cwd until
 	// the first event is parsed. This is what header + gitInfo display, so
@@ -112,7 +119,7 @@ type model struct {
 	err        error
 }
 
-func newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID string) model {
+func newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID string, followActive bool) model {
 	r := newEventReader(jsonlPath)
 	r.SeedFromEnd(500)
 	seeded, _ := r.Seeded()
@@ -124,6 +131,7 @@ func newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID string) model {
 		cwd:            cwd,
 		monitoredCwd:   latestEventCwd(seeded, cwd),
 		sessionID:      sessionID,
+		followActive:   followActive,
 		reader:         r,
 		allEvents:      seeded,
 		rateLimitsPath: defaultRateLimitsPath(),
@@ -158,6 +166,26 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	if last := lastUsage(m.allEvents); last != nil {
 		m.contextPct = contextPercent(m.modelName, *last)
 	}
+}
+
+// switchSession re-binds the monitor to a different session .jsonl: it opens a
+// fresh reader, re-seeds from the end, and recomputes all derived state. The
+// tasks dir is re-derived from the new session ID (its parent is the shared
+// ~/.claude/tasks base). Called when the active session rotates and the
+// monitor is in follow-active mode.
+func (m *model) switchSession(jsonlPath string, now time.Time) {
+	sessionID := strings.TrimSuffix(filepath.Base(jsonlPath), ".jsonl")
+	r := newEventReader(jsonlPath)
+	r.SeedFromEnd(500)
+	seeded, _ := r.Seeded()
+
+	m.jsonlPath = jsonlPath
+	m.sessionID = sessionID
+	m.tasksDir = filepath.Join(filepath.Dir(m.tasksDir), sessionID)
+	m.reader = r
+	m.allEvents = seeded
+	m.monitoredCwd = latestEventCwd(seeded, m.cwd)
+	m.recomputeFromEvents(now)
 }
 
 func lastUserPrompt(events []Event) string {
@@ -211,7 +239,17 @@ func (m model) pollData() tea.Cmd {
 	cwd := m.cwd
 	monitoredCwd := m.monitoredCwd
 	rlPath := m.rateLimitsPath
+	follow := m.followActive
 	return func() tea.Msg {
+		// Follow session rotation: if a newer .jsonl has appeared in the
+		// project dir, surface it so Update can re-bind. Empty when not
+		// following or nothing newer exists.
+		activeJSONL := ""
+		if follow {
+			if mra, ok := mostRecentlyActiveSession(filepath.Dir(jsonlPath)); ok && mra != jsonlPath {
+				activeJSONL = mra
+			}
+		}
 		newEvents, _ := reader.Tail()
 		tasks, _ := readTasks(tasksDir)
 		title, step := discoverPlan(plansDir, jsonlPath, cwd)
@@ -224,6 +262,7 @@ func (m model) pollData() tea.Cmd {
 		siblings := liveSiblingSessions(jsonlPath, now, 2*time.Minute)
 		return dataMsg{
 			time:         now,
+			activeJSONL:  activeJSONL,
 			newEvents:    newEvents,
 			tasks:        tasks,
 			planTitle:    title,
@@ -239,6 +278,7 @@ func (m model) pollData() tea.Cmd {
 
 type dataMsg struct {
 	time         time.Time
+	activeJSONL  string // non-empty when a newer session file should be adopted
 	newEvents    []Event
 	tasks        []task
 	planTitle    string
@@ -272,6 +312,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dataMsg:
 		m.polling = false
+		// Session rotated: re-bind to the newer file and discard this batch's
+		// fields (newEvents tailed from the old reader; tasks/plan/git/siblings
+		// computed against the old path). They refresh on the next poll.
+		if msg.activeJSONL != "" && msg.activeJSONL != m.jsonlPath {
+			m.switchSession(msg.activeJSONL, msg.time)
+			m.lastUpdate = msg.time
+			return m, nil
+		}
 		m.tasks = msg.tasks
 		m.planTitle = msg.planTitle
 		m.planStep = msg.planStep

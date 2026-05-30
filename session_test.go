@@ -179,6 +179,35 @@ func TestResolveSessionFallbackToJSONL(t *testing.T) {
 	}
 }
 
+func TestMostRecentlyActiveSession(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.jsonl")
+	b := filepath.Join(dir, "b.jsonl")
+	notJSONL := filepath.Join(dir, "sessions-index.json")
+	for _, p := range []string{a, b, notJSONL} {
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Backdate a so b is the most-recently-active.
+	old := mustParseTime(t, "2026-01-01T00:00:00Z")
+	if err := os.Chtimes(a, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := mostRecentlyActiveSession(dir)
+	if !ok {
+		t.Fatal("mostRecentlyActiveSession ok=false, want true")
+	}
+	if got != b {
+		t.Errorf("mostRecentlyActiveSession = %q, want %q", got, b)
+	}
+
+	if _, ok := mostRecentlyActiveSession(t.TempDir()); ok {
+		t.Error("empty dir: ok=true, want false")
+	}
+}
+
 func mustParseTime(t *testing.T, s string) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.RFC3339, s)

@@ -85,19 +85,16 @@ func findMostRecentSession(entries []sessionEntry) string {
 	return entries[0].SessionID
 }
 
-// discoverSessionsFromJSONL finds sessions by listing .jsonl files in the project
-// directory and returning the most recently modified one. This is the fallback
-// when sessions-index.json doesn't exist.
-func discoverSessionsFromJSONL(projectDir string) (string, error) {
-	matches, err := filepath.Glob(filepath.Join(projectDir, "*.jsonl"))
-	if err != nil {
-		return "", fmt.Errorf("listing session files: %w", err)
+// mostRecentlyActiveSession returns the path of the most-recently-modified
+// .jsonl file in dir. ok is false when dir has no session files or can't be
+// read — callers should keep their current binding in that case. This is the
+// "most-recently-active" (MRA) selector the live monitor uses to follow a
+// session that rotates underneath it (new session, /clear, resume, compaction).
+func mostRecentlyActiveSession(dir string) (string, bool) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil || len(matches) == 0 {
+		return "", false
 	}
-	if len(matches) == 0 {
-		return "", fmt.Errorf("no session files found in %s", projectDir)
-	}
-
-	// Sort by modification time, most recent first
 	sort.Slice(matches, func(i, j int) bool {
 		infoI, errI := os.Stat(matches[i])
 		infoJ, errJ := os.Stat(matches[j])
@@ -106,10 +103,19 @@ func discoverSessionsFromJSONL(projectDir string) (string, error) {
 		}
 		return infoI.ModTime().After(infoJ.ModTime())
 	})
+	return matches[0], true
+}
 
+// discoverSessionsFromJSONL finds sessions by listing .jsonl files in the project
+// directory and returning the most recently modified one. This is the fallback
+// when sessions-index.json doesn't exist.
+func discoverSessionsFromJSONL(projectDir string) (string, error) {
+	path, ok := mostRecentlyActiveSession(projectDir)
+	if !ok {
+		return "", fmt.Errorf("no session files found in %s", projectDir)
+	}
 	// Extract session ID from filename (strip directory and .jsonl extension)
-	base := filepath.Base(matches[0])
-	return strings.TrimSuffix(base, ".jsonl"), nil
+	return strings.TrimSuffix(filepath.Base(path), ".jsonl"), nil
 }
 
 func resolveSession(claudeProjectsDir string, cwd string, explicitSession string) (string, error) {

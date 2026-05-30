@@ -39,7 +39,12 @@ func main() {
 	encodedPath := encodeProjectPath(cwd)
 	jsonlPath := filepath.Join(claudeProjectsDir, encodedPath, sessionID+".jsonl")
 
-	m := newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID)
+	// Follow the most-recently-active session unless the user pinned one with
+	// --session. Without this, a long-lived monitor stays frozen on whatever
+	// file was newest at launch and goes stale when the session rotates.
+	followActive := *sessionFlag == ""
+
+	m := newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID, followActive)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
