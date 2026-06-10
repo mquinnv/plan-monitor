@@ -7,48 +7,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 func encodeProjectPath(absPath string) string {
 	return strings.ReplaceAll(absPath, "/", "-")
-}
-
-// liveSiblingSessions counts sibling JSONL files in the same project dir
-// whose mtime falls within `window` of `now`, excluding the session at
-// `jsonlPath` itself. A non-zero return value means another Claude Code
-// session is actively writing events into the same on-disk project — i.e.
-// (almost certainly) another Claude is running in the same working
-// directory, which is the collision plan-monitor is meant to surface.
-//
-// Caveat: an idle Claude that hasn't emitted an event in longer than
-// `window` will look "dead" by this heuristic. The window is the tradeoff
-// dial.
-func liveSiblingSessions(jsonlPath string, now time.Time, window time.Duration) int {
-	dir := filepath.Dir(jsonlPath)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
-	cutoff := now.Add(-window)
-	count := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		full := filepath.Join(dir, e.Name())
-		if full == jsonlPath {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().After(cutoff) {
-			count++
-		}
-	}
-	return count
 }
 
 type sessionEntry struct {

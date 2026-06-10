@@ -169,9 +169,9 @@ func formatBudget(n int) string {
 }
 
 // defaultRateLimitsPath returns the abtop statusline cache path. Override
-// with PLAN_MONITOR_RATE_LIMITS_PATH env var.
+// with CLAUDE_HEAD_RATE_LIMITS_PATH env var.
 func defaultRateLimitsPath() string {
-	if p := os.Getenv("PLAN_MONITOR_RATE_LIMITS_PATH"); p != "" {
+	if p := os.Getenv("CLAUDE_HEAD_RATE_LIMITS_PATH"); p != "" {
 		return p
 	}
 	if home, err := os.UserHomeDir(); err == nil {

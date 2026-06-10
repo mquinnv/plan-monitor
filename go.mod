@@ -1,4 +1,4 @@
-module plan-monitor
+module claude-head
 
 go 1.26.2
 

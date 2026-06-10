@@ -7,50 +7,13 @@ import (
 	"time"
 )
 
-func TestLiveSiblingSessions(t *testing.T) {
-	dir := t.TempDir()
-	now := time.Now()
-	me := filepath.Join(dir, "me.jsonl")
-	freshSibling := filepath.Join(dir, "fresh.jsonl")
-	staleSibling := filepath.Join(dir, "stale.jsonl")
-	notJSONL := filepath.Join(dir, "ignore.txt")
-	subDir := filepath.Join(dir, "subdir")
-	for _, p := range []string{me, freshSibling, staleSibling, notJSONL} {
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Mkdir(subDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Backdate the stale sibling well outside the window.
-	if err := os.Chtimes(staleSibling, now.Add(-10*time.Minute), now.Add(-10*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-
-	got := liveSiblingSessions(me, now, 2*time.Minute)
-	if got != 1 {
-		t.Errorf("liveSiblingSessions = %d, want 1 (fresh only)", got)
-	}
-
-	// Wide window picks up the stale one too.
-	if got := liveSiblingSessions(me, now, time.Hour); got != 2 {
-		t.Errorf("wide window = %d, want 2", got)
-	}
-
-	// Excluding self: pretending no siblings exist by giving an isolated path.
-	if got := liveSiblingSessions(filepath.Join(t.TempDir(), "only.jsonl"), now, time.Hour); got != 0 {
-		t.Errorf("isolated dir = %d, want 0", got)
-	}
-}
-
 func TestEncodeProjectPath(t *testing.T) {
 	tests := []struct {
 		input string
 		want  string
 	}{
 		{"/Users/michael/Projects/foo", "-Users-michael-Projects-foo"},
-		{"/Users/michael/Projects/plan-monitor", "-Users-michael-Projects-plan-monitor"},
+		{"/Users/michael/Projects/claude-head", "-Users-michael-Projects-claude-head"},
 		{"/home/user/code", "-home-user-code"},
 	}
 	for _, tt := range tests {

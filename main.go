@@ -26,7 +26,6 @@ func main() {
 	}
 
 	claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
-	plansDir := filepath.Join(homeDir, ".claude", "plans")
 
 	sessionID, err := resolveSession(claudeProjectsDir, cwd, *sessionFlag)
 	if err != nil {
@@ -35,7 +34,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	tasksDir := filepath.Join(homeDir, ".claude", "tasks", sessionID)
 	encodedPath := encodeProjectPath(cwd)
 	jsonlPath := filepath.Join(claudeProjectsDir, encodedPath, sessionID+".jsonl")
 
@@ -44,7 +42,7 @@ func main() {
 	// file was newest at launch and goes stale when the session rotates.
 	followActive := *sessionFlag == ""
 
-	m := newModel(tasksDir, plansDir, jsonlPath, cwd, sessionID, followActive)
+	m := newModel(jsonlPath, sessionID, followActive)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
