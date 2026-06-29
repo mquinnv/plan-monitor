@@ -39,10 +39,11 @@ type Event struct {
 }
 
 type EventReader struct {
-	path    string
-	offset  int64
-	seeded  []Event
-	seedErr error
+	path        string
+	offset      int64
+	seeded      []Event
+	seedErr     error
+	firstPrompt string // genuine first user prompt of the session, captured before ring truncation
 }
 
 func newEventReader(path string) *EventReader {
@@ -79,6 +80,10 @@ func (r *EventReader) SeedFromEnd(maxEvents int) {
 	}
 
 	events := parseLines(data, true)
+	// Capture the session's genuine first prompt from the full parse, before
+	// the ring truncates the head away. lastUserPrompt scans newest-first; the
+	// first prompt needs an oldest-first scan, which firstUserPrompt does.
+	r.firstPrompt = firstUserPrompt(events)
 	if len(events) > maxEvents {
 		events = events[len(events)-maxEvents:]
 	}
@@ -87,6 +92,11 @@ func (r *EventReader) SeedFromEnd(maxEvents int) {
 
 func (r *EventReader) Seeded() ([]Event, error) {
 	return r.seeded, r.seedErr
+}
+
+// FirstPrompt returns the session's first user prompt, captured at seed time.
+func (r *EventReader) FirstPrompt() string {
+	return r.firstPrompt
 }
 
 func (r *EventReader) Tail() ([]Event, error) {

@@ -26,6 +26,11 @@ var (
 	promptStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#1a1a1a")).
 			Foreground(lipgloss.Color("#7a7a7a"))
+
+	promptLabelStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#1a1a1a")).
+				Foreground(lipgloss.Color("#4a4a4a")).
+				Bold(true)
 )
 
 type tickMsg time.Time
@@ -48,12 +53,13 @@ type model struct {
 	pctSamples     []pctSample // 5h-window snapshots over time, for burn-rate
 
 	// Latest snapshot
-	state      State
-	modelName  string
-	contextPct float64
-	lastPrompt string
-	rateLimits RateLimits
-	rateOK     bool
+	state       State
+	modelName   string
+	contextPct  float64
+	firstPrompt string
+	lastPrompt  string
+	rateLimits  RateLimits
+	rateOK      bool
 
 	// UI
 	lastUpdate time.Time
@@ -76,6 +82,7 @@ func newModel(jsonlPath, sessionID string, followActive bool) model {
 		reader:         r,
 		allEvents:      seeded,
 		rateLimitsPath: defaultRateLimitsPath(),
+		firstPrompt:    r.FirstPrompt(),
 	}
 	m.recomputeFromEvents(time.Now())
 	return m
@@ -109,6 +116,7 @@ func (m *model) switchSession(jsonlPath string, now time.Time) {
 	m.sessionID = sessionID
 	m.reader = r
 	m.allEvents = seeded
+	m.firstPrompt = r.FirstPrompt()
 	m.recomputeFromEvents(now)
 }
 
@@ -129,6 +137,19 @@ func lastUsage(events []Event) *Usage {
 func lastUserPrompt(events []Event) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		e := events[i]
+		if (e.Type == "last-prompt" || e.Type == "user") && e.UserText != "" {
+			return e.UserText
+		}
+	}
+	return ""
+}
+
+// firstUserPrompt returns the text of the oldest thing the user sent, scanning
+// the event stream front-to-back. Mirror of lastUserPrompt: only `last-prompt`
+// events and real `user` turns carrying plain text qualify (tool_result turns
+// leave UserText empty, so they're skipped).
+func firstUserPrompt(events []Event) string {
+	for _, e := range events {
 		if (e.Type == "last-prompt" || e.Type == "user") && e.UserText != "" {
 			return e.UserText
 		}
@@ -251,11 +272,19 @@ func (m model) View() string {
 
 	statusbar := renderStatusbar(m, time.Now())
 
-	// Pin the status block to the bottom of the pane. When there's room for a
-	// second line, show the last thing the user sent above the statusbar.
+	// Pin the status block to the bottom of the pane. As vertical room grows,
+	// stack prompt context above the statusbar: the last thing the user sent
+	// (≥2 high), then the session's first prompt at the top (≥3 high).
 	lines := []string{statusbar}
-	if m.height >= 2 {
-		lines = []string{renderPromptLine(m.lastPrompt, m.width), statusbar}
+	switch {
+	case m.height >= 3:
+		lines = []string{
+			renderPromptLine("first", m.firstPrompt, m.width),
+			renderPromptLine("last ", m.lastPrompt, m.width),
+			statusbar,
+		}
+	case m.height == 2:
+		lines = []string{renderPromptLine("last ", m.lastPrompt, m.width), statusbar}
 	}
 	gap := m.height - len(lines)
 	if gap < 0 {
@@ -264,9 +293,10 @@ func (m model) View() string {
 	return strings.Repeat("\n", gap) + strings.Join(lines, "\n")
 }
 
-// renderPromptLine renders the user's most recent prompt as a single
-// background-filled line, collapsing whitespace and truncating to width.
-func renderPromptLine(prompt string, width int) string {
+// renderPromptLine renders a single prompt as a background-filled line,
+// collapsing whitespace and truncating to width. The label (e.g. "first" or
+// "last") is shown dimmed before the prompt text to disambiguate stacked lines.
+func renderPromptLine(label, prompt string, width int) string {
 	if width < 1 {
 		width = 1
 	}
@@ -274,7 +304,16 @@ func renderPromptLine(prompt string, width int) string {
 	if text == "" {
 		text = "—"
 	}
-	content := truncateRunes("❯ "+text, width-2)
+	prefix := "❯ "
+	if label != "" {
+		prefix = label + " ❯ "
+	}
+	// Truncate the plain string (no ANSI escapes) so rune counting stays
+	// accurate, then dim-style the surviving label prefix.
+	content := truncateRunes(prefix+text, width-2)
+	if label != "" && strings.HasPrefix(content, label) {
+		content = promptLabelStyle.Render(label) + strings.TrimPrefix(content, label)
+	}
 	return promptStyle.Width(width).Render(" " + content + " ")
 }
 

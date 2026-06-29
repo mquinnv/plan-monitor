@@ -80,15 +80,46 @@ func TestLastUserPrompt(t *testing.T) {
 	}
 }
 
+func TestFirstUserPrompt(t *testing.T) {
+	events := []Event{
+		{Type: "assistant", UserText: "intro"}, // not a user turn
+		{Type: "last-prompt", UserText: "first thing"},
+		{Type: "user", UserText: ""}, // tool_result turn — no text
+		{Type: "last-prompt", UserText: "second thing"},
+	}
+	if got := firstUserPrompt(events); got != "first thing" {
+		t.Errorf("firstUserPrompt = %q, want %q", got, "first thing")
+	}
+
+	// Falls back to a real user turn when no last-prompt event is present.
+	userOnly := []Event{
+		{Type: "user", UserText: "typed it"},
+		{Type: "user", UserText: "typed again"},
+	}
+	if got := firstUserPrompt(userOnly); got != "typed it" {
+		t.Errorf("firstUserPrompt = %q, want %q", got, "typed it")
+	}
+
+	if got := firstUserPrompt(nil); got != "" {
+		t.Errorf("firstUserPrompt(nil) = %q, want empty", got)
+	}
+}
+
 func TestRenderPromptLine(t *testing.T) {
 	// Newlines and runs of whitespace collapse to single spaces.
-	got := renderPromptLine("hello\n\n  world", 40)
+	got := renderPromptLine("", "hello\n\n  world", 40)
 	if !strings.Contains(got, "❯ hello world") {
 		t.Errorf("renderPromptLine = %q, want it to contain %q", got, "❯ hello world")
 	}
 
+	// A label is shown before the prompt marker.
+	labeled := renderPromptLine("first", "the goal", 40)
+	if !strings.Contains(labeled, "first") || !strings.Contains(labeled, "❯ the goal") {
+		t.Errorf("labeled renderPromptLine = %q, want it to contain label and prompt", labeled)
+	}
+
 	// Long prompts truncate with an ellipsis and never exceed the width.
-	wide := renderPromptLine("this is a very long prompt that will not fit", 20)
+	wide := renderPromptLine("", "this is a very long prompt that will not fit", 20)
 	if w := lipgloss.Width(wide); w != 20 {
 		t.Errorf("rendered width = %d, want 20", w)
 	}
@@ -97,7 +128,7 @@ func TestRenderPromptLine(t *testing.T) {
 	}
 
 	// Empty prompt renders the em-dash placeholder.
-	if got := renderPromptLine("", 20); !strings.Contains(got, "—") {
+	if got := renderPromptLine("", "", 20); !strings.Contains(got, "—") {
 		t.Errorf("empty prompt = %q, want placeholder %q", got, "—")
 	}
 }
