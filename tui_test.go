@@ -3,8 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // When the active Claude session in a directory rotates (a newer .jsonl
@@ -48,6 +51,54 @@ func TestSwitchSessionRebindsToNewerFile(t *testing.T) {
 	}
 	if m.modelName != "claude-new" {
 		t.Errorf("modelName = %q, want %q (reseed+recompute from new file)", m.modelName, "claude-new")
+	}
+}
+
+func TestLastUserPrompt(t *testing.T) {
+	events := []Event{
+		{Type: "last-prompt", UserText: "first thing"},
+		{Type: "assistant", UserText: "i replied"},
+		{Type: "user", UserText: ""}, // tool_result turn — no text
+		{Type: "last-prompt", UserText: "second thing"},
+		{Type: "user", UserText: ""}, // another tool_result
+	}
+	if got := lastUserPrompt(events); got != "second thing" {
+		t.Errorf("lastUserPrompt = %q, want %q", got, "second thing")
+	}
+
+	// Falls back to a real user turn when no last-prompt event is present.
+	userOnly := []Event{
+		{Type: "user", UserText: "typed it"},
+		{Type: "assistant", UserText: "ok"},
+	}
+	if got := lastUserPrompt(userOnly); got != "typed it" {
+		t.Errorf("lastUserPrompt = %q, want %q", got, "typed it")
+	}
+
+	if got := lastUserPrompt(nil); got != "" {
+		t.Errorf("lastUserPrompt(nil) = %q, want empty", got)
+	}
+}
+
+func TestRenderPromptLine(t *testing.T) {
+	// Newlines and runs of whitespace collapse to single spaces.
+	got := renderPromptLine("hello\n\n  world", 40)
+	if !strings.Contains(got, "❯ hello world") {
+		t.Errorf("renderPromptLine = %q, want it to contain %q", got, "❯ hello world")
+	}
+
+	// Long prompts truncate with an ellipsis and never exceed the width.
+	wide := renderPromptLine("this is a very long prompt that will not fit", 20)
+	if w := lipgloss.Width(wide); w != 20 {
+		t.Errorf("rendered width = %d, want 20", w)
+	}
+	if !strings.Contains(wide, "…") {
+		t.Errorf("expected truncated line to contain ellipsis, got %q", wide)
+	}
+
+	// Empty prompt renders the em-dash placeholder.
+	if got := renderPromptLine("", 20); !strings.Contains(got, "—") {
+		t.Errorf("empty prompt = %q, want placeholder %q", got, "—")
 	}
 }
 

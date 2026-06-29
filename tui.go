@@ -22,6 +22,10 @@ var (
 	statusbarStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#1a1a1a")).
 			Foreground(lipgloss.Color("#cccccc"))
+
+	promptStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("#1a1a1a")).
+			Foreground(lipgloss.Color("#7a7a7a"))
 )
 
 type tickMsg time.Time
@@ -47,6 +51,7 @@ type model struct {
 	state      State
 	modelName  string
 	contextPct float64
+	lastPrompt string
 	rateLimits RateLimits
 	rateOK     bool
 
@@ -87,6 +92,7 @@ func (m *model) recomputeFromEvents(now time.Time) {
 	if last := lastUsage(m.allEvents); last != nil {
 		m.contextPct = contextPercent(m.modelName, *last)
 	}
+	m.lastPrompt = lastUserPrompt(m.allEvents)
 }
 
 // switchSession re-binds the monitor to a different session .jsonl: it opens a
@@ -113,6 +119,21 @@ func lastUsage(events []Event) *Usage {
 		}
 	}
 	return nil
+}
+
+// lastUserPrompt returns the text of the most recent thing the user sent.
+// Claude Code emits an explicit `last-prompt` event holding the clean prompt
+// text; real `user` turns also carry it as plain-string content (tool_result
+// turns leave UserText empty, so they're skipped). Whichever is newest in the
+// event stream wins.
+func lastUserPrompt(events []Event) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		if (e.Type == "last-prompt" || e.Type == "user") && e.UserText != "" {
+			return e.UserText
+		}
+	}
+	return ""
 }
 
 func (m model) Init() tea.Cmd {
@@ -230,12 +251,46 @@ func (m model) View() string {
 
 	statusbar := renderStatusbar(m, time.Now())
 
-	// Pin statusbar to bottom of pane.
-	gap := m.height - 1
+	// Pin the status block to the bottom of the pane. When there's room for a
+	// second line, show the last thing the user sent above the statusbar.
+	lines := []string{statusbar}
+	if m.height >= 2 {
+		lines = []string{renderPromptLine(m.lastPrompt, m.width), statusbar}
+	}
+	gap := m.height - len(lines)
 	if gap < 0 {
 		gap = 0
 	}
-	return strings.Repeat("\n", gap) + statusbar
+	return strings.Repeat("\n", gap) + strings.Join(lines, "\n")
+}
+
+// renderPromptLine renders the user's most recent prompt as a single
+// background-filled line, collapsing whitespace and truncating to width.
+func renderPromptLine(prompt string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	text := strings.Join(strings.Fields(prompt), " ")
+	if text == "" {
+		text = "—"
+	}
+	content := truncateRunes("❯ "+text, width-2)
+	return promptStyle.Width(width).Render(" " + content + " ")
+}
+
+// truncateRunes clips s to at most max runes, marking elision with an ellipsis.
+func truncateRunes(s string, max int) string {
+	if max < 1 {
+		max = 1
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max == 1 {
+		return "…"
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // renderStatusbar packs state and budget info onto a single
